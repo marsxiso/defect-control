@@ -116,7 +116,7 @@ const monthNames: Record<string, string> = {
   '12': 'Декабрь',
 };
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://your-backend-service.onrender.com';
+const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://defect-ai-backend.onrender.com';
 const AI_API_URL = `${API_URL}/analyze-defect`;
 
 type RoboflowPrediction = {
