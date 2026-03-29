@@ -120,16 +120,16 @@ type ApiBatchRow = {
   quantity: number;
   status: string;
   created_at?: string;
+  assigned_worker_id?: number | string | null;
+  full_name?: string | null;
 };
 
 type ApiShiftRow = {
   id: number | string;
   worker_id: number | string;
-  batch_id: number | string;
   shift_date: string;
   shift_type: string;
   full_name: string;
-  batch_number: string;
 };
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://defect-control.onrender.com';
@@ -411,7 +411,6 @@ export default function App() {
 
   const [shiftDate, setShiftDate] = useState(todayStr());
   const [shiftEmployeeName, setShiftEmployeeName] = useState('');
-  const [shiftBatchId, setShiftBatchId] = useState('');
 
   const [reportDateFrom, setReportDateFrom] = useState('');
   const [reportDateTo, setReportDateTo] = useState('');
@@ -453,24 +452,16 @@ export default function App() {
       date: item.shift_date,
       employeeName: item.full_name,
       role: 'Рабочий',
-      batchId: String(item.batch_id),
-      batchNumber: item.batch_number,
     }));
 
-    const nextBatches: Batch[] = (batchesData as ApiBatchRow[]).map((item) => {
-      const batchWorkerNames = nextShifts
-        .filter((shift) => shift.batchId === String(item.id))
-        .map((shift) => shift.employeeName);
-
-      return {
-        id: String(item.id),
-        productName: item.product_name,
-        quantity: Number(item.quantity || 0),
-        manufactureDate: (item.created_at || todayStr()).slice(0, 10),
-        workerName: batchWorkerNames.join(', '),
-        status: (item.status as BatchStatus) || 'Готова к проверке',
-      };
-    });
+    const nextBatches: Batch[] = (batchesData as ApiBatchRow[]).map((item) => ({
+      id: String(item.id),
+      productName: item.product_name,
+      quantity: Number(item.quantity || 0),
+      manufactureDate: (item.created_at || todayStr()).slice(0, 10),
+      workerName: item.full_name || '',
+      status: (item.status as BatchStatus) || 'Готова к проверке',
+    }));
 
     setUsers(nextUsers);
     setWorkers(nextWorkers);
@@ -571,6 +562,13 @@ export default function App() {
     [shifts, shiftDate],
   );
 
+  const workersOnSelectedManufactureDate = useMemo(() => {
+    const activeShiftWorkers = shifts
+      .filter((shift) => shift.date === newBatch.manufactureDate)
+      .map((shift) => shift.employeeName);
+    return workers.filter((worker) => activeShiftWorkers.includes(worker.name));
+  }, [workers, shifts, newBatch.manufactureDate]);
+
   const handleLogin = async () => {
     try {
       const response = await fetch(`${API_URL}/auth/login`, {
@@ -621,6 +619,14 @@ export default function App() {
       return;
     }
 
+    const workerOnShift = shifts.some(
+      (shift) => shift.date === newBatch.manufactureDate && shift.employeeName === worker.name,
+    );
+    if (!workerOnShift) {
+      Alert.alert('Ошибка', 'Выбранный рабочий не отмечен в смене на эту дату');
+      return;
+    }
+
     try {
       const batchResponse = await fetch(`${API_URL}/api/batches`, {
         method: 'POST',
@@ -630,28 +636,13 @@ export default function App() {
           product_name: newBatch.productName.trim(),
           quantity: Number(newBatch.quantity || '0'),
           created_by: Number(currentUser.id),
+          assigned_worker_id: Number(worker.id),
         }),
       });
       const batchData = await readJson(batchResponse);
       if (!batchResponse.ok || !batchData?.id) {
         Alert.alert('Ошибка', batchData?.message || 'Не удалось создать партию');
         return;
-      }
-
-      const shiftResponse = await fetch(`${API_URL}/api/shifts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          worker_id: Number(worker.id),
-          batch_id: Number(batchData.id),
-          shift_date: newBatch.manufactureDate,
-          shift_type: 'day',
-          assigned_by: Number(currentUser.id),
-        }),
-      });
-      const shiftData = await readJson(shiftResponse);
-      if (!shiftResponse.ok) {
-        Alert.alert('Ошибка', shiftData?.message || 'Партия создана, но смена не назначена');
       }
 
       await syncAllFromServer();
@@ -661,7 +652,7 @@ export default function App() {
         manufactureDate: todayStr(),
         workerName: '',
       });
-      Alert.alert('Готово', 'Партия создана и сохранена на сервере');
+      Alert.alert('Готово', 'Партия создана и назначена выбранному рабочему');
     } catch {
       Alert.alert('Ошибка', 'Не удалось создать партию');
     }
@@ -679,20 +670,28 @@ export default function App() {
   };
 
   const pickImageFromGallery = async () => {
+  try {
     const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+
     if (!permissionResult.granted) {
       Alert.alert('Нет доступа', 'Разрешите доступ к галерее');
       return;
     }
+
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 0.7,
       allowsEditing: false,
     });
+
     if (!result.canceled && result.assets?.length) {
       setInspectionForm((prev) => ({ ...prev, imageUri: result.assets[0].uri }));
     }
-  };
+  } catch (error) {
+    console.error('GALLERY PICK ERROR:', error);
+    Alert.alert('Ошибка', 'Не удалось выбрать изображение из галереи');
+  }
+};
 
   const capturePhoto = async () => {
     const photo = await cameraRef.current?.takePictureAsync({ quality: 0.7 });
@@ -1028,12 +1027,12 @@ export default function App() {
                     placeholder="YYYY-MM-DD"
                     placeholderTextColor={COLORS.muted}
                   />
-                  <Label text="Рабочий" />
+                  <Label text="Рабочий на смене" />
                   <View style={styles.roleRow}>
-                    {workers.length === 0 ? (
-                      <Text style={styles.text}>Рабочих пока нет.</Text>
+                    {workersOnSelectedManufactureDate.length === 0 ? (
+                      <Text style={styles.text}>На выбранную дату нет рабочих в смене.</Text>
                     ) : (
-                      workers.map((worker) => (
+                      workersOnSelectedManufactureDate.map((worker) => (
                         <Pressable
                           key={worker.id}
                           style={[styles.roleButton, newBatch.workerName === worker.name && styles.roleButtonActive]}
@@ -1300,7 +1299,7 @@ export default function App() {
             <View>
               <SectionTitle title="Смены" />
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Назначить смену</Text>
+                <Text style={styles.cardTitle}>Отметить выход на смену</Text>
                 <Label text="Дата" />
                 <TextInput
                   style={styles.input}
@@ -1325,37 +1324,20 @@ export default function App() {
                     </Pressable>
                   ))}
                 </View>
-                <Label text="Партия" />
-                <View style={styles.roleRow}>
-                  {batches.map((batch) => (
-                    <Pressable
-                      key={batch.id}
-                      style={[styles.roleButton, shiftBatchId === batch.id && styles.roleButtonActive]}
-                      onPress={() => setShiftBatchId(batch.id)}
-                    >
-                      <Text
-                        style={[styles.roleButtonText, shiftBatchId === batch.id && styles.roleButtonTextActive]}
-                      >
-                        {batch.productName} #{batch.id}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
                 <Pressable style={styles.primaryButton} onPress={addShift}>
-                  <Text style={styles.primaryButtonText}>Назначить смену</Text>
+                  <Text style={styles.primaryButtonText}>Отметить выход на смену</Text>
                 </Pressable>
               </View>
 
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Список смен</Text>
                 {visibleShifts.length === 0 ? (
-                  <Text style={styles.text}>На выбранную дату смен нет.</Text>
+                  <Text style={styles.text}>На выбранную дату никто не отмечен в смене.</Text>
                 ) : (
                   visibleShifts.map((shift) => (
                     <View key={shift.id} style={styles.historyItem}>
                       <Text style={styles.text}><Text style={styles.textBold}>{shift.date}</Text></Text>
                       <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
-                      <Text style={styles.text}>Партия: {shift.batchNumber || shift.batchId}</Text>
                       <Text style={styles.text}>Роль: {shift.role}</Text>
                     </View>
                   ))
