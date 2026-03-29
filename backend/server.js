@@ -24,6 +24,25 @@ const pool = new Pool({
   ssl: isProduction ? { rejectUnauthorized: false } : false,
 });
 
+function mapUserRow(user) {
+  return {
+    id: user.id,
+    login: user.login,
+    role: user.role,
+    full_name: user.full_name,
+  };
+}
+
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    message: 'Defect AI backend is running',
+    health: '/api/health',
+    users: '/users',
+    apiUsers: '/api/users',
+  });
+});
+
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -57,12 +76,7 @@ app.post('/auth/login', async (req, res) => {
     res.json({
       ok: true,
       token: 'ok',
-      user: {
-        id: user.id,
-        login: user.login,
-        role: user.role,
-        full_name: user.full_name,
-      },
+      user: mapUserRow(user),
     });
   } catch (err) {
     console.error(err);
@@ -70,21 +84,28 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-app.get('/users', async (req, res) => {
+async function getUsersHandler(req, res) {
   try {
-    const result = await pool.query('SELECT id, login, full_name, role FROM users ORDER BY full_name');
+    const result = await pool.query(
+      'SELECT id, login, full_name, role FROM users ORDER BY COALESCE(full_name, login)'
+    );
     res.json(result.rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Не удалось получить пользователей' });
   }
-});
+}
 
-app.post('/users', async (req, res) => {
+app.get('/users', getUsersHandler);
+app.get('/api/users', getUsersHandler);
+
+async function createUserHandler(req, res) {
   const { login, password, full_name, role } = req.body;
+  const nextRole = role || 'user';
+  const nextFullName = full_name || login;
 
-  if (!login || !password || !full_name || !role) {
-    return res.status(400).json({ ok: false, message: 'Заполните login, password, full_name и role' });
+  if (!login || !password) {
+    return res.status(400).json({ ok: false, message: 'Заполните login и password' });
   }
 
   try {
@@ -94,17 +115,26 @@ app.post('/users', async (req, res) => {
       `INSERT INTO users (login, password_hash, full_name, role)
        VALUES ($1, $2, $3, $4)
        RETURNING id, login, full_name, role`,
-      [login, hash, full_name, role]
+      [login, hash, nextFullName, nextRole]
     );
 
     res.status(201).json({ ok: true, user: result.rows[0] });
   } catch (err) {
     console.error(err);
+
+    if (err.code === '23505') {
+      return res.status(409).json({ ok: false, message: 'Пользователь с таким login уже существует' });
+    }
+
     res.status(500).json({ ok: false, message: 'Не удалось создать пользователя' });
   }
-});
+}
 
-app.patch('/users/:id/password', async (req, res) => {
+app.post('/users', createUserHandler);
+app.post('/api/users', createUserHandler);
+app.post('/api/register', createUserHandler);
+
+async function updatePasswordHandler(req, res) {
   const { password } = req.body;
   const { id } = req.params;
 
@@ -115,14 +145,24 @@ app.patch('/users/:id/password', async (req, res) => {
   try {
     const hash = await bcrypt.hash(password, 10);
 
-    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
+    const result = await pool.query(
+      'UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id',
+      [hash, id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, message: 'Пользователь не найден' });
+    }
 
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Не удалось обновить пароль' });
   }
-});
+}
+
+app.patch('/users/:id/password', updatePasswordHandler);
+app.patch('/api/users/:id/password', updatePasswordHandler);
 
 app.post('/analyze-defect', upload.single('file'), async (req, res) => {
   if (!req.file) {
@@ -144,13 +184,18 @@ app.post('/analyze-defect', upload.single('file'), async (req, res) => {
       },
     });
 
-    fs.unlinkSync(req.file.path);
+    if (fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+
     res.json(response.data);
   } catch (err) {
     console.error(err.message);
+
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
+
     res.status(500).json({ ok: false, error: 'Ошибка анализа изображения' });
   }
 });
@@ -158,5 +203,5 @@ app.post('/analyze-defect', upload.single('file'), async (req, res) => {
 const PORT = process.env.PORT || 8000;
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server started on port ${PORT}`);
+  console.log(`Server started on port ${PORT}`);
 });
