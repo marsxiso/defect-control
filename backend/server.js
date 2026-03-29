@@ -19,87 +19,59 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-
-async function ensureSchema() {
-  await pool.query(schemaSql);
-  await pool.query(`ALTER TABLE batches ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`);
-  await pool.query(`ALTER TABLE batches ADD COLUMN IF NOT EXISTS assigned_worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL`);
-  await pool.query(`ALTER TABLE batches ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'Готова к проверке'`);
-  await pool.query(`ALTER TABLE batches ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()`);
-  await pool.query(`ALTER TABLE batches ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
-  await pool.query(`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL`);
-  await pool.query(`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()`);
-  await pool.query(`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
+async function runSchema() {
+  const schemaPath = path.join(__dirname, 'schema.sql');
+  const sql = fs.readFileSync(schemaPath, 'utf8');
+  await pool.query(sql);
 }
 
-function isControlLocked(batch) {
-  return batch.status === 'Отправлено на сборку';
+function toInt(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
-async function getBatchById(client, batchId) {
-  const result = await client.query(
-    `SELECT b.*, w.full_name AS worker_name
-     FROM batches b
-     LEFT JOIN workers w ON w.id = b.assigned_worker_id
-     WHERE b.id = $1`,
-    [batchId],
-  );
-  return result.rows[0] || null;
-}
-
-async function getInspectionWithDefects(client, batchId) {
-  const result = await client.query(
-    `SELECT
-       i.id AS inspection_id,
-       i.batch_id,
-       i.inspector_id,
-       i.inspector_name,
-       i.inspection_date,
-       i.visual_conclusion,
-       i.geometry_conclusion,
-       i.accepted_count,
-       i.rejected_count,
-       i.comment,
-       i.created_at,
-       i.updated_at,
-       d.id AS defect_id,
-       d.defect_class,
-       d.confidence,
-       d.affected_count,
-       d.comment AS defect_comment,
-       d.image_uri
-     FROM inspections i
-     LEFT JOIN inspection_defects d ON d.inspection_id = i.id
-     WHERE i.batch_id = $1
-     ORDER BY d.id ASC`,
-    [batchId],
-  );
-
-  if (result.rows.length === 0) return null;
-  const head = result.rows[0];
+function mapInspectionRow(row) {
   return {
-    id: String(head.inspection_id),
-    batchId: String(head.batch_id),
-    inspectorId: head.inspector_id != null ? String(head.inspector_id) : null,
-    inspector: head.inspector_name,
-    date: String(head.inspection_date).slice(0, 10),
-    visualConclusion: head.visual_conclusion || '',
-    geometryConclusion: head.geometry_conclusion || '',
-    acceptedCount: Number(head.accepted_count || 0),
-    rejectedCount: Number(head.rejected_count || 0),
-    comment: head.comment || '',
-    defects: result.rows
-      .filter((row) => row.defect_id != null)
-      .map((row) => ({
-        id: String(row.defect_id),
-        defectClass: row.defect_class,
-        confidence: Number(row.confidence || 0),
-        affectedCount: Number(row.affected_count || 0),
-        comment: row.defect_comment || '',
-        imageUri: row.image_uri || undefined,
-      })),
+    id: String(row.id),
+    batch_id: String(row.batch_id),
+    inspector_id: String(row.inspector_id),
+    inspector_name: row.inspector_name,
+    inspection_date: String(row.inspection_date).slice(0, 10),
+    visual_conclusion: row.visual_conclusion || '',
+    geometry_conclusion: row.geometry_conclusion || '',
+    accepted_count: Number(row.accepted_count || 0),
+    rejected_count: Number(row.rejected_count || 0),
+    comment: row.comment || '',
+    defects: Array.isArray(row.defects) ? row.defects : [],
   };
+}
+
+async function getInspectionByBatch(batchId) {
+  const result = await pool.query(
+    `SELECT
+      i.*,
+      u.full_name AS inspector_name,
+      COALESCE(
+        json_agg(
+          json_build_object(
+            'id', d.id,
+            'defect_class', d.defect_class,
+            'confidence', d.confidence,
+            'affected_count', d.affected_count,
+            'comment', d.comment,
+            'image_uri', d.image_uri
+          )
+        ) FILTER (WHERE d.id IS NOT NULL),
+        '[]'::json
+      ) AS defects
+    FROM inspections i
+    JOIN users u ON u.id = i.inspector_id
+    LEFT JOIN inspection_defects d ON d.inspection_id = i.id
+    WHERE i.batch_id = $1
+    GROUP BY i.id, u.full_name`,
+    [batchId]
+  );
+  return result.rows[0] ? mapInspectionRow(result.rows[0]) : null;
 }
 
 app.get('/', (req, res) => {
@@ -124,7 +96,7 @@ app.post('/auth/login', async (req, res) => {
 
     const result = await pool.query(
       'SELECT * FROM users WHERE login = $1 AND password_hash = $2',
-      [login, password],
+      [login, password]
     );
 
     if (result.rows.length === 0) {
@@ -171,14 +143,16 @@ app.get('/api/workers', async (req, res) => {
 app.post('/api/workers', async (req, res) => {
   try {
     const { full_name } = req.body;
-    if (!full_name || !String(full_name).trim()) {
+    if (!full_name) {
       return res.status(400).json({ ok: false, message: 'full_name обязателен' });
     }
-
     const result = await pool.query(
-      'INSERT INTO workers (full_name) VALUES ($1) RETURNING *',
-      [String(full_name).trim()],
+      'INSERT INTO workers (full_name) VALUES ($1) ON CONFLICT (full_name) DO NOTHING RETURNING *',
+      [full_name.trim()]
     );
+    if (!result.rows[0]) {
+      return res.status(400).json({ ok: false, message: 'Такой рабочий уже существует' });
+    }
     res.json(result.rows[0]);
   } catch (error) {
     console.error('CREATE WORKER ERROR:', error);
@@ -186,14 +160,171 @@ app.post('/api/workers', async (req, res) => {
   }
 });
 
+app.get('/api/batches', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        b.*,
+        w.full_name,
+        creator.full_name AS creator_name,
+        i.id AS inspection_id,
+        i.inspector_id,
+        inspector.full_name AS inspector_name,
+        i.inspection_date,
+        i.accepted_count,
+        i.rejected_count,
+        i.comment AS inspection_comment,
+        b.accepted_by_user_id
+      FROM batches b
+      LEFT JOIN workers w ON b.assigned_worker_id = w.id
+      LEFT JOIN users creator ON b.created_by = creator.id
+      LEFT JOIN inspections i ON i.batch_id = b.id
+      LEFT JOIN users inspector ON i.inspector_id = inspector.id
+      ORDER BY b.id DESC
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('GET BATCHES ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось получить партии' });
+  }
+});
+
+app.post('/api/batches', async (req, res) => {
+  try {
+    const { batch_number, product_name, quantity, created_by, assigned_worker_id } = req.body;
+    if (!batch_number || !product_name || !assigned_worker_id) {
+      return res.status(400).json({ ok: false, message: 'Не все обязательные поля заполнены' });
+    }
+    const result = await pool.query(
+      `INSERT INTO batches (batch_number, product_name, quantity, created_by, assigned_worker_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [batch_number, product_name.trim(), quantity || 0, created_by || null, assigned_worker_id]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('CREATE BATCH ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось создать партию' });
+  }
+});
+
+app.put('/api/batches/:id', async (req, res) => {
+  try {
+    const batchId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id);
+    const { product_name, quantity, assigned_worker_id, manufacture_date } = req.body;
+    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (String(batch.created_by || '') !== String(editorId || '')) {
+      return res.status(403).json({ ok: false, message: 'Можно редактировать только свои партии' });
+    }
+    if (batch.status !== 'Готова к проверке') {
+      return res.status(400).json({ ok: false, message: 'Проверенную партию редактировать нельзя' });
+    }
+    const updated = await pool.query(
+      `UPDATE batches
+       SET product_name = $1,
+           quantity = $2,
+           assigned_worker_id = $3,
+           created_at = COALESCE($4::timestamptz, created_at)
+       WHERE id = $5
+       RETURNING *`,
+      [product_name.trim(), quantity || 0, assigned_worker_id, manufacture_date || null, batchId]
+    );
+    res.json(updated.rows[0]);
+  } catch (error) {
+    console.error('UPDATE BATCH ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить партию' });
+  }
+});
+
+app.delete('/api/batches/:id', async (req, res) => {
+  try {
+    const batchId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id || req.query.editor_id);
+    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (String(batch.created_by || '') !== String(editorId || '')) {
+      return res.status(403).json({ ok: false, message: 'Можно удалять только свои партии' });
+    }
+    if (batch.status !== 'Готова к проверке') {
+      return res.status(400).json({ ok: false, message: 'Проверенную партию удалить нельзя' });
+    }
+    await pool.query('DELETE FROM batches WHERE id = $1', [batchId]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('DELETE BATCH ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось удалить партию' });
+  }
+});
+
+app.post('/api/batches/:id/accept', async (req, res) => {
+  try {
+    const batchId = toInt(req.params.id);
+    const userId = toInt(req.body.user_id);
+    if (!batchId || !userId) {
+      return res.status(400).json({ ok: false, message: 'batch_id и user_id обязательны' });
+    }
+
+    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (batch.status !== 'Готова к проверке') {
+      return res.status(400).json({ ok: false, message: 'Принять можно только партию, готовую к проверке' });
+    }
+    if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(userId)) {
+      return res.status(400).json({ ok: false, message: 'Партия уже принята другим сотрудником' });
+    }
+
+    const updated = await pool.query(
+      'UPDATE batches SET accepted_by_user_id = $1 WHERE id = $2 RETURNING *',
+      [userId, batchId]
+    );
+    res.json(updated.rows[0]);
+  } catch (error) {
+    console.error('ACCEPT BATCH ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось принять партию' });
+  }
+});
+
+app.post('/api/batches/:id/send-to-assembly', async (req, res) => {
+  try {
+    const batchId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id);
+    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (String(batch.created_by || '') !== String(editorId || '')) {
+      return res.status(403).json({ ok: false, message: 'Отправить на сборку может только создатель партии' });
+    }
+    if (batch.status !== 'Проверена') {
+      return res.status(400).json({ ok: false, message: 'На сборку можно отправить только проверенную партию' });
+    }
+    const result = await pool.query(
+      `UPDATE batches SET status = 'Отправлено на сборку' WHERE id = $1 RETURNING *`,
+      [batchId]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('SEND TO ASSEMBLY ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось отправить партию на сборку' });
+  }
+});
+
 app.get('/api/shifts', async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT s.*, w.full_name
-       FROM shifts s
-       JOIN workers w ON s.worker_id = w.id
-       ORDER BY s.shift_date DESC, s.id DESC`,
-    );
+    const result = await pool.query(`
+      SELECT
+        s.*,
+        COALESCE(w.full_name, u.full_name, s.employee_name) AS full_name,
+        COALESCE(s.employee_type, CASE WHEN s.user_id IS NOT NULL THEN 'controller' ELSE 'worker' END) AS employee_type
+      FROM shifts s
+      LEFT JOIN workers w ON s.worker_id = w.id
+      LEFT JOIN users u ON s.user_id = u.id
+      ORDER BY s.shift_date DESC, s.id DESC
+    `);
     res.json(result.rows);
   } catch (error) {
     console.error('GET SHIFTS ERROR:', error);
@@ -203,24 +334,35 @@ app.get('/api/shifts', async (req, res) => {
 
 app.post('/api/shifts', async (req, res) => {
   try {
-    const { worker_id, shift_date, shift_type, assigned_by } = req.body;
-    if (!worker_id || !shift_date || !shift_type) {
-      return res.status(400).json({ ok: false, message: 'worker_id, shift_date и shift_type обязательны' });
+    const { worker_id, user_id, shift_date, shift_type, assigned_by, employee_type } = req.body;
+    if (!shift_date || !shift_type || !employee_type) {
+      return res.status(400).json({ ok: false, message: 'Не все обязательные поля заполнены' });
+    }
+    if (employee_type === 'worker' && !worker_id) {
+      return res.status(400).json({ ok: false, message: 'Не выбран рабочий' });
+    }
+    if (employee_type === 'controller' && !user_id) {
+      return res.status(400).json({ ok: false, message: 'Не выбран контролер' });
     }
 
-    const existing = await pool.query(
-      'SELECT id FROM shifts WHERE worker_id = $1 AND shift_date = $2',
-      [worker_id, shift_date],
-    );
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ ok: false, message: 'Рабочий уже отмечен в смене на эту дату' });
+    const duplicate = employee_type === 'worker'
+      ? await pool.query('SELECT id FROM shifts WHERE employee_type = $1 AND worker_id = $2 AND shift_date = $3', [employee_type, worker_id, shift_date])
+      : await pool.query('SELECT id FROM shifts WHERE employee_type = $1 AND user_id = $2 AND shift_date = $3', [employee_type, user_id, shift_date]);
+
+    if (duplicate.rows.length > 0) {
+      return res.status(400).json({ ok: false, message: 'Сотрудник уже назначен на эту дату' });
     }
+
+    const employeeLookup = employee_type === 'worker'
+      ? await pool.query('SELECT full_name FROM workers WHERE id = $1', [worker_id])
+      : await pool.query('SELECT full_name FROM users WHERE id = $1', [user_id]);
+    const employeeName = employeeLookup.rows[0]?.full_name || null;
 
     const result = await pool.query(
-      `INSERT INTO shifts (worker_id, shift_date, shift_type, assigned_by)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO shifts (worker_id, user_id, shift_date, shift_type, assigned_by, employee_type, employee_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [worker_id, shift_date, shift_type, assigned_by || null],
+      [worker_id || null, user_id || null, shift_date, shift_type, assigned_by || null, employee_type, employeeName]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -231,44 +373,40 @@ app.post('/api/shifts', async (req, res) => {
 
 app.put('/api/shifts/:id', async (req, res) => {
   try {
-    const { worker_id, shift_date, shift_type, assigned_by } = req.body;
-    if (!worker_id || !shift_date || !shift_type) {
-      return res.status(400).json({ ok: false, message: 'worker_id, shift_date и shift_type обязательны' });
+    const shiftId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id);
+    const { shift_date } = req.body;
+    const shiftResult = await pool.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
+    const shift = shiftResult.rows[0];
+    if (!shift) return res.status(404).json({ ok: false, message: 'Смена не найдена' });
+    if (String(shift.assigned_by || '') !== String(editorId || '')) {
+      return res.status(403).json({ ok: false, message: 'Можно редактировать только свои смены' });
     }
-
-    const duplicate = await pool.query(
-      'SELECT id FROM shifts WHERE worker_id = $1 AND shift_date = $2 AND id <> $3',
-      [worker_id, shift_date, req.params.id],
-    );
+    const duplicate = shift.employee_type === 'worker'
+      ? await pool.query('SELECT id FROM shifts WHERE employee_type = $1 AND worker_id = $2 AND shift_date = $3 AND id <> $4', [shift.employee_type, shift.worker_id, shift_date, shiftId])
+      : await pool.query('SELECT id FROM shifts WHERE employee_type = $1 AND user_id = $2 AND shift_date = $3 AND id <> $4', [shift.employee_type, shift.user_id, shift_date, shiftId]);
     if (duplicate.rows.length > 0) {
-      return res.status(400).json({ ok: false, message: 'На эту дату у рабочего уже есть смена' });
+      return res.status(400).json({ ok: false, message: 'На эту дату уже есть такая смена' });
     }
-
-    const result = await pool.query(
-      `UPDATE shifts
-       SET worker_id = $1, shift_date = $2, shift_type = $3, assigned_by = COALESCE($4, assigned_by), updated_at = NOW()
-       WHERE id = $5
-       RETURNING *`,
-      [worker_id, shift_date, shift_type, assigned_by || null, req.params.id],
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, message: 'Смена не найдена' });
-    }
-
+    const result = await pool.query('UPDATE shifts SET shift_date = $1 WHERE id = $2 RETURNING *', [shift_date, shiftId]);
     res.json(result.rows[0]);
   } catch (error) {
     console.error('UPDATE SHIFT ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось изменить смену' });
+    res.status(500).json({ ok: false, message: 'Не удалось обновить смену' });
   }
 });
 
 app.delete('/api/shifts/:id', async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM shifts WHERE id = $1 RETURNING id', [req.params.id]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, message: 'Смена не найдена' });
+    const shiftId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id || req.query.editor_id);
+    const shiftResult = await pool.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
+    const shift = shiftResult.rows[0];
+    if (!shift) return res.status(404).json({ ok: false, message: 'Смена не найдена' });
+    if (String(shift.assigned_by || '') !== String(editorId || '')) {
+      return res.status(403).json({ ok: false, message: 'Можно удалять только свои смены' });
     }
+    await pool.query('DELETE FROM shifts WHERE id = $1', [shiftId]);
     res.json({ ok: true });
   } catch (error) {
     console.error('DELETE SHIFT ERROR:', error);
@@ -276,187 +414,35 @@ app.delete('/api/shifts/:id', async (req, res) => {
   }
 });
 
-app.get('/api/batches', async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT
-         b.*,
-         w.full_name,
-         u.full_name AS created_by_name
-       FROM batches b
-       LEFT JOIN workers w ON b.assigned_worker_id = w.id
-       LEFT JOIN users u ON b.created_by = u.id
-       ORDER BY b.id DESC`,
-    );
-    res.json(result.rows);
-  } catch (error) {
-    console.error('GET BATCHES ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось получить партии' });
-  }
-});
-
-app.post('/api/batches', async (req, res) => {
-  try {
-    const { batch_number, product_name, quantity, created_by, assigned_worker_id, status } = req.body;
-    if (!batch_number || !product_name) {
-      return res.status(400).json({ ok: false, message: 'batch_number и product_name обязательны' });
-    }
-    if (!assigned_worker_id) {
-      return res.status(400).json({ ok: false, message: 'assigned_worker_id обязателен' });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO batches (batch_number, product_name, quantity, created_by, assigned_worker_id, status)
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'Готова к проверке'))
-       RETURNING *`,
-      [batch_number, product_name, quantity || 0, created_by || null, assigned_worker_id, status || null],
-    );
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error('CREATE BATCH ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось создать партию' });
-  }
-});
-
-app.put('/api/batches/:id', async (req, res) => {
-  try {
-    const { product_name, quantity, assigned_worker_id, manufacture_date } = req.body;
-    const current = await getBatchById(pool, req.params.id);
-    if (!current) {
-      return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    }
-    if (isControlLocked(current)) {
-      return res.status(409).json({ ok: false, message: 'Партия уже отправлена на сборку и не может быть изменена' });
-    }
-
-    const result = await pool.query(
-      `UPDATE batches
-       SET product_name = $1,
-           quantity = $2,
-           assigned_worker_id = $3,
-           created_at = COALESCE($4::timestamp, created_at),
-           updated_at = NOW()
-       WHERE id = $5
-       RETURNING *`,
-      [product_name || current.product_name, quantity ?? current.quantity, assigned_worker_id || current.assigned_worker_id, manufacture_date || null, req.params.id],
-    );
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error('UPDATE BATCH ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось изменить партию' });
-  }
-});
-
-app.delete('/api/batches/:id', async (req, res) => {
-  try {
-    const current = await getBatchById(pool, req.params.id);
-    if (!current) {
-      return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    }
-    const inspection = await getInspectionWithDefects(pool, req.params.id);
-    if (inspection || current.status === 'Проверена' || current.status === 'Отправлено на сборку') {
-      return res.status(409).json({ ok: false, message: 'Партию нельзя удалить после начала контроля' });
-    }
-
-    await pool.query('DELETE FROM batches WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
-  } catch (error) {
-    console.error('DELETE BATCH ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось удалить партию' });
-  }
-});
-
-app.post('/api/batches/:id/send-to-assembly', async (req, res) => {
-  try {
-    const inspection = await getInspectionWithDefects(pool, req.params.id);
-    if (!inspection) {
-      return res.status(409).json({ ok: false, message: 'Сначала сохраните контроль партии' });
-    }
-
-    const result = await pool.query(
-      `UPDATE batches
-       SET status = 'Отправлено на сборку', updated_at = NOW()
-       WHERE id = $1
-       RETURNING *`,
-      [req.params.id],
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    }
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error('SEND TO ASSEMBLY ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось отправить партию на сборку' });
-  }
-});
-
 app.get('/api/inspections', async (req, res) => {
   try {
-    const batchFilter = req.query.batch_id ? 'WHERE i.batch_id = $1' : '';
-    const params = req.query.batch_id ? [req.query.batch_id] : [];
-    const result = await pool.query(
-      `SELECT
-         i.id AS inspection_id,
-         i.batch_id,
-         i.inspector_id,
-         i.inspector_name,
-         i.inspection_date,
-         i.visual_conclusion,
-         i.geometry_conclusion,
-         i.accepted_count,
-         i.rejected_count,
-         i.comment,
-         d.id AS defect_id,
-         d.defect_class,
-         d.confidence,
-         d.affected_count,
-         d.comment AS defect_comment,
-         d.image_uri
-       FROM inspections i
-       LEFT JOIN inspection_defects d ON d.inspection_id = i.id
-       ${batchFilter}
-       ORDER BY i.inspection_date DESC, i.id DESC, d.id ASC`,
-      params,
-    );
-
-    const grouped = new Map();
-    for (const row of result.rows) {
-      const key = String(row.inspection_id);
-      if (!grouped.has(key)) {
-        grouped.set(key, {
-          id: key,
-          batchId: String(row.batch_id),
-          inspectorId: row.inspector_id != null ? String(row.inspector_id) : null,
-          inspector: row.inspector_name,
-          date: String(row.inspection_date).slice(0, 10),
-          visualConclusion: row.visual_conclusion || '',
-          geometryConclusion: row.geometry_conclusion || '',
-          acceptedCount: Number(row.accepted_count || 0),
-          rejectedCount: Number(row.rejected_count || 0),
-          comment: row.comment || '',
-          defects: [],
-        });
-      }
-      if (row.defect_id != null) {
-        grouped.get(key).defects.push({
-          id: String(row.defect_id),
-          defectClass: row.defect_class,
-          confidence: Number(row.confidence || 0),
-          affectedCount: Number(row.affected_count || 0),
-          comment: row.defect_comment || '',
-          imageUri: row.image_uri || undefined,
-        });
-      }
-    }
-
-    res.json(Array.from(grouped.values()));
+    const result = await pool.query(`
+      SELECT
+        i.*,
+        u.full_name AS inspector_name,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', d.id,
+              'defect_class', d.defect_class,
+              'confidence', d.confidence,
+              'affected_count', d.affected_count,
+              'comment', d.comment,
+              'image_uri', d.image_uri
+            )
+          ) FILTER (WHERE d.id IS NOT NULL),
+          '[]'::json
+        ) AS defects
+      FROM inspections i
+      JOIN users u ON u.id = i.inspector_id
+      LEFT JOIN inspection_defects d ON d.inspection_id = i.id
+      GROUP BY i.id, u.full_name
+      ORDER BY i.id DESC
+    `);
+    res.json(result.rows.map(mapInspectionRow));
   } catch (error) {
     console.error('GET INSPECTIONS ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось получить проверки' });
+    res.status(500).json({ ok: false, message: 'Не удалось получить результаты контроля' });
   }
 });
 
@@ -467,7 +453,6 @@ app.post('/api/inspections', async (req, res) => {
       batch_id,
       inspector_id,
       inspector_name,
-      inspection_date,
       visual_conclusion,
       geometry_conclusion,
       accepted_count,
@@ -476,70 +461,54 @@ app.post('/api/inspections', async (req, res) => {
       defects,
     } = req.body;
 
-    if (!batch_id || !inspector_name) {
-      return res.status(400).json({ ok: false, message: 'batch_id и inspector_name обязательны' });
+    let resolvedInspectorId = toInt(inspector_id);
+    if (!resolvedInspectorId && inspector_name) {
+      const inspectorResult = await client.query('SELECT id FROM users WHERE full_name = $1 LIMIT 1', [inspector_name]);
+      resolvedInspectorId = toInt(inspectorResult.rows[0]?.id);
+    }
+
+    if (!batch_id || !resolvedInspectorId) {
+      return res.status(400).json({ ok: false, message: 'batch_id и inspector_id обязательны' });
+    }
+
+    const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [batch_id]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (batch.status === 'Отправлено на сборку') {
+      return res.status(400).json({ ok: false, message: 'Партия уже отправлена на сборку' });
+    }
+    if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(resolvedInspectorId)) {
+      return res.status(403).json({ ok: false, message: 'Сохранять контроль может только сотрудник, принявший партию' });
+    }
+
+    const existing = await client.query('SELECT * FROM inspections WHERE batch_id = $1', [batch_id]);
+    if (existing.rows[0]) {
+      return res.status(400).json({ ok: false, message: 'Для партии уже есть контроль. Используйте обновление.' });
     }
 
     await client.query('BEGIN');
-    const batch = await getBatchById(client, batch_id);
-    if (!batch) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    }
-    if (isControlLocked(batch)) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, message: 'Партия уже отправлена на сборку' });
-    }
-
-    const existing = await getInspectionWithDefects(client, batch_id);
-    if (existing) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, message: 'Проверка уже существует. Используйте обновление.' });
-    }
-
-    const inspectionResult = await client.query(
+    const inserted = await client.query(
       `INSERT INTO inspections (
-         batch_id, inspector_id, inspector_name, inspection_date,
-         visual_conclusion, geometry_conclusion, accepted_count, rejected_count, comment
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING *`,
-      [
-        batch_id,
-        inspector_id || null,
-        inspector_name,
-        inspection_date || new Date().toISOString().slice(0, 10),
-        visual_conclusion || '',
-        geometry_conclusion || '',
-        accepted_count || 0,
-        rejected_count || 0,
-        comment || '',
-      ],
+        batch_id, inspector_id, inspection_date, visual_conclusion, geometry_conclusion,
+        accepted_count, rejected_count, comment
+      ) VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6, $7)
+      RETURNING *`,
+      [batch_id, resolvedInspectorId, visual_conclusion || '', geometry_conclusion || '', accepted_count || 0, rejected_count || 0, comment || '']
     );
+    const inspection = inserted.rows[0];
 
-    const inspectionId = inspectionResult.rows[0].id;
     for (const defect of Array.isArray(defects) ? defects : []) {
       await client.query(
         `INSERT INTO inspection_defects (inspection_id, defect_class, confidence, affected_count, comment, image_uri)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [
-          inspectionId,
-          defect.defectClass || 'Неопределено',
-          Number(defect.confidence || 0),
-          Number(defect.affectedCount || 0),
-          defect.comment || '',
-          defect.imageUri || null,
-        ],
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [inspection.id, defect.defect_class, defect.confidence || 0, defect.affected_count || 0, defect.comment || '', defect.image_uri || null]
       );
     }
 
-    await client.query(
-      `UPDATE batches SET status = 'Проверена', updated_at = NOW() WHERE id = $1`,
-      [batch_id],
-    );
+    await client.query(`UPDATE batches SET status = 'Проверена', accepted_by_user_id = $2 WHERE id = $1`, [batch_id, resolvedInspectorId]);
     await client.query('COMMIT');
 
-    const fullInspection = await getInspectionWithDefects(pool, batch_id);
-    res.json(fullInspection);
+    res.json(await getInspectionByBatch(batch_id));
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('CREATE INSPECTION ERROR:', error);
@@ -552,11 +521,9 @@ app.post('/api/inspections', async (req, res) => {
 app.put('/api/inspections/:id', async (req, res) => {
   const client = await pool.connect();
   try {
+    const inspectionId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id);
     const {
-      batch_id,
-      inspector_id,
-      inspector_name,
-      inspection_date,
       visual_conclusion,
       geometry_conclusion,
       accepted_count,
@@ -565,68 +532,45 @@ app.put('/api/inspections/:id', async (req, res) => {
       defects,
     } = req.body;
 
+    const existingResult = await client.query('SELECT * FROM inspections WHERE id = $1', [inspectionId]);
+    const inspection = existingResult.rows[0];
+    if (!inspection) return res.status(404).json({ ok: false, message: 'Контроль не найден' });
+
+    const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [inspection.batch_id]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (batch.status === 'Отправлено на сборку') {
+      return res.status(400).json({ ok: false, message: 'После отправки на сборку контроль менять нельзя' });
+    }
+    if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(editorId)) {
+      return res.status(403).json({ ok: false, message: 'Изменять контроль может только сотрудник, принявший партию' });
+    }
+    if (String(inspection.inspector_id) !== String(editorId)) {
+      return res.status(403).json({ ok: false, message: 'Изменять проверенную партию может только тот, кто ее проверял' });
+    }
+
     await client.query('BEGIN');
-    const inspectionExists = await client.query('SELECT * FROM inspections WHERE id = $1', [req.params.id]);
-    if (inspectionExists.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, message: 'Проверка не найдена' });
-    }
-
-    const targetBatchId = batch_id || inspectionExists.rows[0].batch_id;
-    const batch = await getBatchById(client, targetBatchId);
-    if (!batch) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    }
-    if (isControlLocked(batch)) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, message: 'Данные контроля нельзя изменить: партия уже отправлена на сборку' });
-    }
-
     await client.query(
-      `UPDATE inspections
-       SET inspector_id = $1,
-           inspector_name = $2,
-           inspection_date = $3,
-           visual_conclusion = $4,
-           geometry_conclusion = $5,
-           accepted_count = $6,
-           rejected_count = $7,
-           comment = $8,
-           updated_at = NOW()
-       WHERE id = $9`,
-      [
-        inspector_id || null,
-        inspector_name || inspectionExists.rows[0].inspector_name,
-        inspection_date || inspectionExists.rows[0].inspection_date,
-        visual_conclusion || '',
-        geometry_conclusion || '',
-        accepted_count || 0,
-        rejected_count || 0,
-        comment || '',
-        req.params.id,
-      ],
+      `UPDATE inspections SET
+        visual_conclusion = $1,
+        geometry_conclusion = $2,
+        accepted_count = $3,
+        rejected_count = $4,
+        comment = $5,
+        updated_at = NOW()
+      WHERE id = $6`,
+      [visual_conclusion || '', geometry_conclusion || '', accepted_count || 0, rejected_count || 0, comment || '', inspectionId]
     );
-
-    await client.query('DELETE FROM inspection_defects WHERE inspection_id = $1', [req.params.id]);
+    await client.query('DELETE FROM inspection_defects WHERE inspection_id = $1', [inspectionId]);
     for (const defect of Array.isArray(defects) ? defects : []) {
       await client.query(
         `INSERT INTO inspection_defects (inspection_id, defect_class, confidence, affected_count, comment, image_uri)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [
-          req.params.id,
-          defect.defectClass || 'Неопределено',
-          Number(defect.confidence || 0),
-          Number(defect.affectedCount || 0),
-          defect.comment || '',
-          defect.imageUri || null,
-        ],
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [inspectionId, defect.defect_class, defect.confidence || 0, defect.affected_count || 0, defect.comment || '', defect.image_uri || null]
       );
     }
-
     await client.query('COMMIT');
-    const fullInspection = await getInspectionWithDefects(pool, targetBatchId);
-    res.json(fullInspection);
+    res.json(await getInspectionByBatch(inspection.batch_id));
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('UPDATE INSPECTION ERROR:', error);
@@ -662,7 +606,7 @@ app.post('/analyze-defect', upload.single('file'), async (req, res) => {
 
 const PORT = process.env.PORT || 8000;
 
-ensureSchema()
+runSchema()
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Server started on port ${PORT}`);

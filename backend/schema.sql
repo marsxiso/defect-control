@@ -8,19 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS workers (
   id SERIAL PRIMARY KEY,
-  full_name TEXT UNIQUE NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS shifts (
-  id SERIAL PRIMARY KEY,
-  worker_id INTEGER NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
-  shift_date DATE NOT NULL,
-  shift_type TEXT NOT NULL DEFAULT 'day',
-  assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  UNIQUE(worker_id, shift_date)
+  full_name TEXT UNIQUE NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS batches (
@@ -29,34 +17,59 @@ CREATE TABLE IF NOT EXISTS batches (
   product_name TEXT NOT NULL,
   quantity INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'Готова к проверке',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   assigned_worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+  accepted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS shifts (
+  id SERIAL PRIMARY KEY,
+  shift_date DATE NOT NULL,
+  shift_type TEXT NOT NULL DEFAULT 'day',
+  employee_type TEXT NOT NULL,
+  worker_id INTEGER REFERENCES workers(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  employee_name TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT shifts_employee_type_check CHECK (employee_type IN ('worker', 'controller'))
 );
 
 CREATE TABLE IF NOT EXISTS inspections (
   id SERIAL PRIMARY KEY,
   batch_id INTEGER NOT NULL UNIQUE REFERENCES batches(id) ON DELETE CASCADE,
-  inspector_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  inspector_name TEXT NOT NULL,
+  inspector_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   inspection_date DATE NOT NULL DEFAULT CURRENT_DATE,
   visual_conclusion TEXT DEFAULT '',
   geometry_conclusion TEXT DEFAULT '',
   accepted_count INTEGER NOT NULL DEFAULT 0,
   rejected_count INTEGER NOT NULL DEFAULT 0,
   comment TEXT DEFAULT '',
-  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS inspection_defects (
   id SERIAL PRIMARY KEY,
   inspection_id INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
   defect_class TEXT NOT NULL,
-  confidence NUMERIC(10,6) NOT NULL DEFAULT 0,
+  confidence NUMERIC(8,6) NOT NULL DEFAULT 0,
   affected_count INTEGER NOT NULL DEFAULT 0,
   comment TEXT DEFAULT '',
-  image_uri TEXT,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  image_uri TEXT
 );
+
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS assigned_worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS employee_type TEXT;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS worker_id INTEGER REFERENCES workers(id) ON DELETE CASCADE;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+UPDATE shifts SET employee_type = COALESCE(employee_type, CASE WHEN user_id IS NOT NULL THEN 'controller' ELSE 'worker' END);
+
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS accepted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS employee_name TEXT;
+UPDATE shifts SET employee_name = COALESCE(employee_name, 'Не указан');
