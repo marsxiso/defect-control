@@ -144,6 +144,35 @@ app.post('/api/batches', async (req, res) => {
   }
 });
 
+
+app.patch('/api/batches/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status) {
+      return res.status(400).json({ ok: false, message: 'Статус обязателен' });
+    }
+
+    const result = await pool.query(
+      `UPDATE batches
+       SET status = $1
+       WHERE id = $2
+       RETURNING *`,
+      [status, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    }
+
+    res.json({ ok: true, batch: result.rows[0] });
+  } catch (error) {
+    console.error('UPDATE BATCH STATUS ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить статус партии' });
+  }
+});
+
 // ================= SHIFTS
 app.get('/api/shifts', async (req, res) => {
   try {
