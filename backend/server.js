@@ -186,6 +186,165 @@ app.post('/api/shifts', async (req, res) => {
   }
 });
 
+
+// ================= INSPECTION REPORTS
+app.get('/api/inspection-reports', async (req, res) => {
+  try {
+    const reportsResult = await pool.query(`
+      SELECT
+        ir.*,
+        u.full_name AS inspector_name
+      FROM inspection_reports ir
+      LEFT JOIN users u ON ir.inspector_id = u.id
+      ORDER BY ir.created_at DESC, ir.id DESC
+    `);
+
+    const reportIds = reportsResult.rows.map((row) => row.id);
+
+    let defectsByReportId = {};
+    if (reportIds.length > 0) {
+      const defectsResult = await pool.query(
+        `
+          SELECT *
+          FROM defects
+          WHERE report_id = ANY($1::int[])
+          ORDER BY id ASC
+        `,
+        [reportIds]
+      );
+
+      defectsByReportId = defectsResult.rows.reduce((acc, row) => {
+        const key = String(row.report_id);
+        if (!acc[key]) acc[key] = [];
+        acc[key].push(row);
+        return acc;
+      }, {});
+    }
+
+    const reports = reportsResult.rows.map((row) => ({
+      ...row,
+      defects: defectsByReportId[String(row.id)] || [],
+    }));
+
+    res.json(reports);
+  } catch (error) {
+    console.error('GET INSPECTION REPORTS ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось получить отчёты контроля' });
+  }
+});
+
+app.post('/api/inspection-reports', async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const {
+      batch_id,
+      inspector_id,
+      visual_conclusion,
+      geometry_conclusion,
+      accepted_count,
+      rejected_count,
+      comment,
+      defects,
+    } = req.body;
+
+    if (!batch_id || !inspector_id) {
+      return res.status(400).json({
+        ok: false,
+        message: 'batch_id и inspector_id обязательны',
+      });
+    }
+
+    await client.query('BEGIN');
+
+    const reportResult = await client.query(
+      `
+        INSERT INTO inspection_reports (
+          batch_id,
+          inspector_id,
+          visual_conclusion,
+          geometry_conclusion,
+          accepted_count,
+          rejected_count,
+          comment
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+      `,
+      [
+        batch_id,
+        inspector_id,
+        visual_conclusion || '',
+        geometry_conclusion || '',
+        accepted_count || 0,
+        rejected_count || 0,
+        comment || '',
+      ]
+    );
+
+    const report = reportResult.rows[0];
+    const insertedDefects = [];
+
+    if (Array.isArray(defects) && defects.length > 0) {
+      for (const item of defects) {
+        const defectResult = await client.query(
+          `
+            INSERT INTO defects (
+              report_id,
+              defect_type,
+              confidence,
+              affected_count,
+              comment
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+          `,
+          [
+            report.id,
+            item.defect_type || 'Неопределено',
+            item.confidence || 0,
+            item.affected_count || 0,
+            item.comment || '',
+          ]
+        );
+
+        insertedDefects.push(defectResult.rows[0]);
+      }
+    }
+
+    await client.query(
+      `
+        UPDATE batches
+        SET status = 'Проверена'
+        WHERE id = $1
+      `,
+      [batch_id]
+    );
+
+    await client.query('COMMIT');
+
+    const inspectorResult = await pool.query(
+      'SELECT full_name FROM users WHERE id = $1',
+      [inspector_id]
+    );
+
+    res.json({
+      ok: true,
+      report: {
+        ...report,
+        inspector_name: inspectorResult.rows[0]?.full_name || 'Неизвестно',
+        defects: insertedDefects,
+      },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('CREATE INSPECTION REPORT ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось сохранить отчёт контроля' });
+  } finally {
+    client.release();
+  }
+});
+
 // ================= AI
 app.post('/analyze-defect', upload.single('file'), async (req, res) => {
   try {
