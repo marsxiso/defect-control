@@ -408,6 +408,8 @@ export default function App() {
 
   const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
   const [newWorkerName, setNewWorkerName] = useState('');
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [userForm, setUserForm] = useState({ name: '', login: '', password: '' });
   const [inspectionForm, setInspectionForm] = useState({
     visualConclusion: '',
     geometryConclusion: '',
@@ -708,6 +710,7 @@ export default function App() {
     setEditingBatchId(null);
     setEditingShiftId(null);
     setReportSelectedBatchId(null);
+    cancelEditUser();
     setToken('');
     setLogin('');
     setPassword('');
@@ -1004,6 +1007,48 @@ export default function App() {
     }
   };
 
+  const startEditUser = (user: User) => {
+    setEditingUserId(user.id);
+    setUserForm({ name: user.name, login: user.login, password: '' });
+    setScreen('admin');
+  };
+
+  const cancelEditUser = () => {
+    setEditingUserId(null);
+    setUserForm({ name: '', login: '', password: '' });
+  };
+
+  const saveUserChanges = async () => {
+    if (!currentUser || currentUser.role !== 'Администратор' || !editingUserId) return;
+    if (!userForm.name.trim() || !userForm.login.trim()) {
+      Alert.alert('Ошибка', 'Имя и логин обязательны');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/api/users/${editingUserId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          editor_id: Number(currentUser.id),
+          full_name: userForm.name.trim(),
+          login: userForm.login.trim(),
+          password: userForm.password.trim(),
+        }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось обновить пользователя');
+        return;
+      }
+      await syncAllFromServer();
+      cancelEditUser();
+      Alert.alert('Готово', 'Пользователь обновлен');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось обновить пользователя');
+    }
+  };
+
   const addWorker = async () => {
     const name = newWorkerName.trim();
     if (!name) {
@@ -1161,9 +1206,10 @@ export default function App() {
         <Text style={styles.text}>Количество: {batch.quantity}</Text>
         <Text style={styles.text}>Дата: {batch.manufactureDate}</Text>
         <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
-        {!!batch.creatorName && <Text style={styles.text}>Создал: {batch.creatorName}</Text>}
         {!!batch.acceptedByUserId && (
-          <Text style={styles.text}>Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : 'другой сотрудник'}</Text>
+          <Text style={styles.text}>
+            Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : users.find((u) => u.id === batch.acceptedByUserId)?.name || 'Неизвестно'}
+          </Text>
         )}
         {!!batch.inspectorName && <Text style={styles.text}>Проверил: {batch.inspectorName}</Text>}
         {inspection && renderInspectionPreview(inspection)}
@@ -1382,7 +1428,11 @@ export default function App() {
                     <Text style={styles.text}>Количество: {selectedBatch.quantity}</Text>
                     <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
-                    {!!selectedBatch.acceptedByUserId && <Text style={styles.text}>Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : 'другой сотрудник'}</Text>}
+                    {!!selectedBatch.acceptedByUserId && (
+                      <Text style={styles.text}>
+                        Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : users.find((u) => u.id === selectedBatch.acceptedByUserId)?.name || 'Неизвестно'}
+                      </Text>
+                    )}
                     {selectedInspection && <Text style={styles.text}>Проверил: {selectedInspection.inspector}</Text>}
                   </View>
 
@@ -1605,11 +1655,27 @@ export default function App() {
               <SectionTitle title="Панель администратора" />
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Пользователи</Text>
+                {editingUserId && (
+                  <View style={styles.cardSoft}>
+                    <Text style={styles.cardSubTitle}>Редактирование пользователя</Text>
+                    <Label text="Имя" />
+                    <TextInput style={styles.input} value={userForm.name} onChangeText={(value) => setUserForm((prev) => ({ ...prev, name: value }))} />
+                    <Label text="Логин" />
+                    <TextInput style={styles.input} value={userForm.login} onChangeText={(value) => setUserForm((prev) => ({ ...prev, login: value }))} autoCapitalize="none" />
+                    <Label text="Новый пароль" />
+                    <TextInput style={styles.input} value={userForm.password} onChangeText={(value) => setUserForm((prev) => ({ ...prev, password: value }))} placeholder="Оставьте пустым, чтобы не менять" placeholderTextColor={COLORS.muted} secureTextEntry />
+                    <Pressable style={styles.primaryButton} onPress={saveUserChanges}><Text style={styles.primaryButtonText}>Сохранить пользователя</Text></Pressable>
+                    <Pressable style={styles.secondaryButton} onPress={cancelEditUser}><Text style={styles.secondaryButtonText}>Отменить</Text></Pressable>
+                  </View>
+                )}
                 {users.map((u) => (
                   <View key={u.id} style={styles.historyItem}>
                     <Text style={styles.text}><Text style={styles.textBold}>{u.name}</Text></Text>
                     <Text style={styles.text}>Логин: {u.login}</Text>
                     <Text style={styles.text}>Роль: {u.role}</Text>
+                    <Pressable style={styles.secondaryButton} onPress={() => startEditUser(u)}>
+                      <Text style={styles.secondaryButtonText}>Редактировать</Text>
+                    </Pressable>
                   </View>
                 ))}
               </View>

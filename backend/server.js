@@ -130,6 +130,60 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const userId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id);
+    const { full_name, login, password } = req.body;
+
+    if (!userId || !editorId) {
+      return res.status(400).json({ ok: false, message: 'user_id и editor_id обязательны' });
+    }
+    if (!full_name || !String(full_name).trim() || !login || !String(login).trim()) {
+      return res.status(400).json({ ok: false, message: 'Имя и логин обязательны' });
+    }
+
+    const editorResult = await pool.query('SELECT role FROM users WHERE id = $1', [editorId]);
+    const editor = editorResult.rows[0];
+    if (!editor || editor.role !== 'admin') {
+      return res.status(403).json({ ok: false, message: 'Редактировать пользователей может только администратор' });
+    }
+
+    const duplicate = await pool.query('SELECT id FROM users WHERE login = $1 AND id <> $2', [String(login).trim(), userId]);
+    if (duplicate.rows.length > 0) {
+      return res.status(400).json({ ok: false, message: 'Такой логин уже занят' });
+    }
+
+    const result = password && String(password).trim()
+      ? await pool.query(
+          `UPDATE users
+           SET full_name = $1,
+               login = $2,
+               password_hash = $3
+           WHERE id = $4
+           RETURNING id, login, full_name, role`,
+          [String(full_name).trim(), String(login).trim(), String(password).trim(), userId]
+        )
+      : await pool.query(
+          `UPDATE users
+           SET full_name = $1,
+               login = $2
+           WHERE id = $3
+           RETURNING id, login, full_name, role`,
+          [String(full_name).trim(), String(login).trim(), userId]
+        );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ ok: false, message: 'Пользователь не найден' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('UPDATE USER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить пользователя' });
+  }
+});
+
 app.get('/api/workers', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM workers ORDER BY full_name');
@@ -462,19 +516,13 @@ app.post('/api/inspections', async (req, res) => {
     } = req.body;
 
     let resolvedInspectorId = toInt(inspector_id);
-    let resolvedInspectorName = (inspector_name || '').trim();
-    if (!resolvedInspectorId && resolvedInspectorName) {
-      const inspectorResult = await client.query('SELECT id, full_name FROM users WHERE full_name = $1 LIMIT 1', [resolvedInspectorName]);
+    if (!resolvedInspectorId && inspector_name) {
+      const inspectorResult = await client.query('SELECT id FROM users WHERE full_name = $1 LIMIT 1', [inspector_name]);
       resolvedInspectorId = toInt(inspectorResult.rows[0]?.id);
-      resolvedInspectorName = inspectorResult.rows[0]?.full_name || resolvedInspectorName;
-    }
-    if (resolvedInspectorId) {
-      const inspectorResult = await client.query('SELECT full_name FROM users WHERE id = $1 LIMIT 1', [resolvedInspectorId]);
-      resolvedInspectorName = inspectorResult.rows[0]?.full_name || resolvedInspectorName;
     }
 
-    if (!batch_id || !resolvedInspectorId || !resolvedInspectorName) {
-      return res.status(400).json({ ok: false, message: 'batch_id, inspector_id и inspector_name обязательны' });
+    if (!batch_id || !resolvedInspectorId) {
+      return res.status(400).json({ ok: false, message: 'batch_id и inspector_id обязательны' });
     }
 
     const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [batch_id]);
@@ -495,20 +543,11 @@ app.post('/api/inspections', async (req, res) => {
     await client.query('BEGIN');
     const inserted = await client.query(
       `INSERT INTO inspections (
-        batch_id, inspector_id, inspector_name, inspection_date, visual_conclusion, geometry_conclusion,
+        batch_id, inspector_id, inspection_date, visual_conclusion, geometry_conclusion,
         accepted_count, rejected_count, comment
-      ) VALUES ($1, $2, $3, CURRENT_DATE, $4, $5, $6, $7, $8)
+      ) VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6, $7)
       RETURNING *`,
-      [
-        batch_id,
-        resolvedInspectorId,
-        resolvedInspectorName,
-        visual_conclusion || '',
-        geometry_conclusion || '',
-        accepted_count || 0,
-        rejected_count || 0,
-        comment || '',
-      ]
+      [batch_id, resolvedInspectorId, visual_conclusion || '', geometry_conclusion || '', accepted_count || 0, rejected_count || 0, comment || '']
     );
     const inspection = inserted.rows[0];
 
