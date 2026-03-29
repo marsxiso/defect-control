@@ -15,7 +15,7 @@ import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 
 type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор';
-type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Отправлено на сборку';
+type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Готова к отправке' | 'Отправлено на сборку';
 type DefectClass =
   | 'Без дефекта'
   | 'Царапина'
@@ -374,7 +374,7 @@ function StatCard({ title, value }: { title: string; value: string }) {
 
 function StatusBadge({ status }: { status: BatchStatus }) {
   const backgroundColor =
-    status === 'Готова к проверке' ? '#2563eb' : status === 'Проверена' ? '#15803d' : '#6b7280';
+    status === 'Готова к проверке' ? '#2563eb' : status === 'Проверена' ? '#15803d' : status === 'Готова к отправке' ? '#f59e0b' : '#6b7280';
   return (
     <View style={[styles.badge, { backgroundColor }]}>
       <Text style={styles.badgeText}>{status}</Text>
@@ -410,6 +410,10 @@ export default function App() {
 
   const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
   const [newWorkerName, setNewWorkerName] = useState('');
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [userForm, setUserForm] = useState({ name: '', login: '', password: '', role: 'Контролер' as Role });
+  const [editingWorkerId, setEditingWorkerId] = useState<string | null>(null);
+  const [workerFormName, setWorkerFormName] = useState('');
   const [inspectionForm, setInspectionForm] = useState({
     visualConclusion: '',
     geometryConclusion: '',
@@ -477,7 +481,7 @@ export default function App() {
       total: currentMonthBatches.length,
       readyCheck: currentMonthBatches.filter((b) => b.status === 'Готова к проверке').length,
       checked: currentMonthBatches.filter((b) => b.status === 'Проверена').length,
-      sentToAssembly: currentMonthBatches.filter((b) => b.status === 'Отправлено на сборку').length,
+      readyToSend: currentMonthBatches.filter((b) => b.status === 'Готова к отправке').length,
     }),
     [currentMonthBatches],
   );
@@ -485,6 +489,14 @@ export default function App() {
   const visibleBatchesPage = useMemo(
     () => [...batches].filter((b) => b.status !== 'Отправлено на сборку').sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
     [batches],
+  );
+
+  const readyToSendBatches = useMemo(
+    () => batches
+      .filter((b) => b.status === 'Готова к отправке')
+      .filter((b) => isDateInRange(b.manufactureDate, reportDateFrom, reportDateTo))
+      .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
+    [batches, reportDateFrom, reportDateTo],
   );
 
   const reportBatches = useMemo(
@@ -540,14 +552,14 @@ export default function App() {
 
   const batchCanBeEditedByCurrentUser = useMemo(() => {
     if (!currentUser || !selectedBatch) return false;
-    if (selectedBatch.status === 'Отправлено на сборку') return false;
+    if (selectedBatch.status === 'Готова к отправке' || selectedBatch.status === 'Отправлено на сборку') return false;
     if (!selectedInspection) return false;
     return selectedInspection.inspectorId === currentUser.id;
   }, [currentUser, selectedBatch, selectedInspection]);
 
   const inspectionLocked = useMemo(() => {
     if (!selectedBatch) return true;
-    if (selectedBatch.status === 'Отправлено на сборку') return true;
+    if (selectedBatch.status === 'Готова к отправке' || selectedBatch.status === 'Отправлено на сборку') return true;
     if (!selectedInspection) return false;
     return !batchCanBeEditedByCurrentUser;
   }, [selectedBatch, selectedInspection, batchCanBeEditedByCurrentUser]);
@@ -1028,6 +1040,143 @@ export default function App() {
     Alert.alert('Готово', 'Рабочий добавлен');
   };
 
+
+  const deleteWorker = async (worker: Worker) => {
+    Alert.alert('Удаление рабочего', `Удалить ${worker.name}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/workers/${worker.id}`, { method: 'DELETE' });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить рабочего');
+              return;
+            }
+            await syncAllFromServer();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить рабочего');
+          }
+        },
+      },
+    ]);
+  };
+
+  const startEditWorker = (worker: Worker) => {
+    setEditingWorkerId(worker.id);
+    setWorkerFormName(worker.name);
+  };
+
+  const saveWorker = async () => {
+    const name = workerFormName.trim();
+    if (!name) {
+      Alert.alert('Ошибка', 'Введите имя рабочего');
+      return;
+    }
+    try {
+      if (editingWorkerId) {
+        const response = await fetch(`${API_URL}/api/workers/${editingWorkerId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ full_name: name }),
+        });
+        const data = await readJson(response);
+        if (!response.ok) {
+          Alert.alert('Ошибка', data?.message || 'Не удалось обновить рабочего');
+          return;
+        }
+        await syncAllFromServer();
+        setEditingWorkerId(null);
+        setWorkerFormName('');
+        return;
+      }
+      await addWorker();
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось сохранить рабочего');
+    }
+  };
+
+  const startEditUser = (user: User) => {
+    setEditingUserId(user.id);
+    setUserForm({ name: user.name, login: user.login, password: '', role: user.role });
+  };
+
+  const saveUser = async () => {
+    if (!editingUserId) return;
+    if (!userForm.name.trim() || !userForm.login.trim()) {
+      Alert.alert('Ошибка', 'Заполните имя и логин');
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/users/${editingUserId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          full_name: userForm.name.trim(),
+          login: userForm.login.trim(),
+          password: userForm.password,
+          role: userForm.role,
+        }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось обновить пользователя');
+        return;
+      }
+      await syncAllFromServer();
+      setEditingUserId(null);
+      setUserForm({ name: '', login: '', password: '', role: 'Контролер' });
+      Alert.alert('Готово', 'Пользователь обновлен');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось обновить пользователя');
+    }
+  };
+
+  const deleteUser = async (user: User) => {
+    Alert.alert('Удаление пользователя', `Удалить ${user.name}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/users/${user.id}`, { method: 'DELETE' });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить пользователя');
+              return;
+            }
+            await syncAllFromServer();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить пользователя');
+          }
+        },
+      },
+    ]);
+  };
+
+  const markBatchReadyToSend = async (batch: Batch) => {
+    if (!currentUser) return;
+    try {
+      const response = await fetch(`${API_URL}/api/batches/${batch.id}/mark-ready-to-send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ editor_id: Number(currentUser.id) }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось подготовить партию к отправке');
+        return;
+      }
+      await syncAllFromServer();
+      Alert.alert('Готово', 'Партия переведена в статус "Готова к отправке"');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось подготовить партию к отправке');
+    }
+  };
+
   const selectedScheduleEmployeeType: ShiftEmployeeType =
     currentUser?.role === 'Контрольный мастер' ? 'controller' : 'worker';
 
@@ -1143,7 +1292,8 @@ export default function App() {
   const renderBatchCard = (batch: Batch, mode: 'list' | 'report' = 'list') => {
     const inspection = inspections.find((item) => item.batchId === batch.id);
     const canEditBatch = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к проверке';
-    const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
+    const canMarkReadyToSend = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
+    const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к отправке';
     const canAcceptBatch =
       mode === 'list' &&
       (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер' || currentUser?.role === 'Администратор') &&
@@ -1164,9 +1314,8 @@ export default function App() {
         <Text style={styles.text}>Количество: {batch.quantity}</Text>
         <Text style={styles.text}>Дата: {batch.manufactureDate}</Text>
         <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
-        {!!batch.creatorName && <Text style={styles.text}>Создал: {batch.creatorName}</Text>}
         {!!batch.acceptedByUserId && (
-          <Text style={styles.text}>Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : 'другой сотрудник'}</Text>
+          <Text style={styles.text}>Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : users.find((u) => u.id === batch.acceptedByUserId)?.name || 'Неизвестно'}</Text>
         )}
         {!!batch.inspectorName && <Text style={styles.text}>Проверил: {batch.inspectorName}</Text>}
         {inspection && renderInspectionPreview(inspection)}
@@ -1201,7 +1350,13 @@ export default function App() {
           </View>
         )}
 
-        {mode === 'list' && canSendToAssembly && (
+        {mode === 'list' && canMarkReadyToSend && (
+          <Pressable style={styles.primaryButton} onPress={() => markBatchReadyToSend(batch)}>
+            <Text style={styles.primaryButtonText}>Подготовить к отправке</Text>
+          </Pressable>
+        )}
+
+        {mode === 'report' && canSendToAssembly && (
           <Pressable style={styles.primaryButton} onPress={() => sendBatchToAssembly(batch)}>
             <Text style={styles.primaryButtonText}>Отправить на сборку</Text>
           </Pressable>
@@ -1292,8 +1447,8 @@ export default function App() {
               <Text style={styles.topRole}>{currentUser.role}</Text>
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
-            <Pressable style={styles.secondaryButton} onPress={handleLogout}>
-              <Text style={styles.secondaryButtonText}>Выход</Text>
+            <Pressable style={styles.iconLogoutButton} onPress={handleLogout}>
+              <Text style={styles.iconLogoutText}>⎋</Text>
             </Pressable>
           </View>
 
@@ -1313,7 +1468,7 @@ export default function App() {
                 <StatCard title="Партий за месяц" value={String(stats.total)} />
                 <StatCard title="Готовы к проверке" value={String(stats.readyCheck)} />
                 <StatCard title="Проверены" value={String(stats.checked)} />
-                <StatCard title="Отправлены на сборку" value={String(stats.sentToAssembly)} />
+                <StatCard title="Готовы к отправке" value={String(stats.readyToSend)} />
               </View>
             </View>
           )}
@@ -1385,13 +1540,19 @@ export default function App() {
                     <Text style={styles.text}>Количество: {selectedBatch.quantity}</Text>
                     <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
-                    {!!selectedBatch.acceptedByUserId && <Text style={styles.text}>Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : 'другой сотрудник'}</Text>}
+                    {!!selectedBatch.acceptedByUserId && <Text style={styles.text}>Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : users.find((u) => u.id === selectedBatch.acceptedByUserId)?.name || 'Неизвестно'}</Text>}
                     {selectedInspection && <Text style={styles.text}>Проверил: {selectedInspection.inspector}</Text>}
                   </View>
 
                   {selectedBatch.status === 'Проверена' && selectedInspection && selectedInspection.inspectorId !== currentUser.id && (
                     <View style={[styles.card, styles.warningCard]}>
                       <Text style={styles.warningText}>Партия уже проверена. Изменять ее до отправки на сборку может только {selectedInspection.inspector}.</Text>
+                    </View>
+                  )}
+
+                  {selectedBatch.status === 'Готова к отправке' && (
+                    <View style={[styles.card, styles.warningCard]}>
+                      <Text style={styles.warningText}>Партия готова к отправке. Редактирование контроля недоступно.</Text>
                     </View>
                   )}
 
@@ -1528,8 +1689,13 @@ export default function App() {
               )}
 
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Отчёты за последний месяц</Text>
-                {recentArchive.length === 0 ? <Text style={styles.text}>Нет отчётов за последний месяц.</Text> : recentArchive.map((batch) => renderBatchCard(batch, 'report'))}
+                <Text style={styles.cardTitle}>Готовы к отправке</Text>
+                {readyToSendBatches.length === 0 ? <Text style={styles.text}>Нет партий, готовых к отправке.</Text> : readyToSendBatches.map((batch) => renderBatchCard(batch, 'report'))}
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Архив за последний месяц</Text>
+                {recentArchive.length === 0 ? <Text style={styles.text}>Нет архивных отчётов за последний месяц.</Text> : recentArchive.map((batch) => renderBatchCard(batch, 'report'))}
               </View>
 
               <View style={styles.card}>
@@ -1606,23 +1772,57 @@ export default function App() {
           {screen === 'admin' && currentUser.role === 'Администратор' && (
             <View>
               <SectionTitle title="Панель администратора" />
+
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Пользователи</Text>
+                {editingUserId && (
+                  <>
+                    <Label text="Имя" />
+                    <TextInput style={styles.input} value={userForm.name} onChangeText={(value) => setUserForm((prev) => ({ ...prev, name: value }))} />
+                    <Label text="Логин" />
+                    <TextInput style={styles.input} value={userForm.login} onChangeText={(value) => setUserForm((prev) => ({ ...prev, login: value }))} />
+                    <Label text="Новый пароль" />
+                    <TextInput style={styles.input} value={userForm.password} secureTextEntry onChangeText={(value) => setUserForm((prev) => ({ ...prev, password: value }))} />
+                    <Label text="Роль" />
+                    <View style={styles.roleRow}>
+                      {(['Администратор', 'Контролер', 'Контрольный мастер', 'Производственный мастер'] as Role[]).map((role) => (
+                        <Pressable key={role} style={[styles.roleButton, userForm.role === role && styles.roleButtonActive]} onPress={() => setUserForm((prev) => ({ ...prev, role }))}>
+                          <Text style={[styles.roleButtonText, userForm.role === role && styles.roleButtonTextActive]}>{role}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <Pressable style={styles.primaryButton} onPress={saveUser}><Text style={styles.primaryButtonText}>Сохранить пользователя</Text></Pressable>
+                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingUserId(null); setUserForm({ name: '', login: '', password: '', role: 'Контролер' }); }}><Text style={styles.secondaryButtonText}>Отменить</Text></Pressable>
+                  </>
+                )}
+
                 {users.map((u) => (
                   <View key={u.id} style={styles.historyItem}>
                     <Text style={styles.text}><Text style={styles.textBold}>{u.name}</Text></Text>
                     <Text style={styles.text}>Логин: {u.login}</Text>
                     <Text style={styles.text}>Роль: {u.role}</Text>
+                    <View style={styles.actionsWrap}>
+                      <Pressable style={styles.secondaryButton} onPress={() => startEditUser(u)}><Text style={styles.secondaryButtonText}>Редактировать</Text></Pressable>
+                      {u.id !== currentUser.id && <Pressable style={styles.dangerButton} onPress={() => deleteUser(u)}><Text style={styles.dangerButtonText}>Удалить</Text></Pressable>}
+                    </View>
                   </View>
                 ))}
               </View>
+
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Рабочие</Text>
-                <Label text="Новый рабочий" />
-                <TextInput style={styles.input} value={newWorkerName} onChangeText={setNewWorkerName} />
-                <Pressable style={styles.primaryButton} onPress={addWorker}><Text style={styles.primaryButtonText}>Добавить рабочего</Text></Pressable>
+                <Label text={editingWorkerId ? 'Редактирование рабочего' : 'Новый рабочий'} />
+                <TextInput style={styles.input} value={editingWorkerId ? workerFormName : newWorkerName} onChangeText={editingWorkerId ? setWorkerFormName : setNewWorkerName} />
+                <Pressable style={styles.primaryButton} onPress={editingWorkerId ? saveWorker : addWorker}><Text style={styles.primaryButtonText}>{editingWorkerId ? 'Сохранить рабочего' : 'Добавить рабочего'}</Text></Pressable>
+                {editingWorkerId && <Pressable style={styles.secondaryButton} onPress={() => { setEditingWorkerId(null); setWorkerFormName(''); }}><Text style={styles.secondaryButtonText}>Отменить</Text></Pressable>}
                 {workers.map((worker) => (
-                  <View key={worker.id} style={styles.historyItem}><Text style={styles.text}>{worker.name}</Text></View>
+                  <View key={worker.id} style={styles.historyItem}>
+                    <Text style={styles.text}>{worker.name}</Text>
+                    <View style={styles.actionsWrap}>
+                      <Pressable style={styles.secondaryButton} onPress={() => startEditWorker(worker)}><Text style={styles.secondaryButtonText}>Редактировать</Text></Pressable>
+                      <Pressable style={styles.dangerButton} onPress={() => deleteWorker(worker)}><Text style={styles.dangerButtonText}>Удалить</Text></Pressable>
+                    </View>
+                  </View>
                 ))}
               </View>
             </View>
@@ -1659,6 +1859,8 @@ const styles = StyleSheet.create({
   primaryButtonText: { color: '#052e16', fontWeight: '800' },
   secondaryButton: { backgroundColor: COLORS.soft, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
+  iconLogoutButton: { width: 44, height: 44, borderRadius: 12, backgroundColor: COLORS.soft, alignItems: 'center', justifyContent: 'center' },
+  iconLogoutText: { color: COLORS.text, fontSize: 20, fontWeight: '800' },
   dangerButton: { backgroundColor: '#7f1d1d', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   dangerButtonText: { color: '#fee2e2', fontWeight: '700' },
   sectionTitle: { color: COLORS.text, fontSize: 22, fontWeight: '700', marginBottom: 12 },

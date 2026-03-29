@@ -160,6 +160,79 @@ app.post('/api/workers', async (req, res) => {
   }
 });
 
+
+app.put('/api/workers/:id', async (req, res) => {
+  try {
+    const workerId = toInt(req.params.id);
+    const { full_name } = req.body;
+    if (!workerId || !full_name?.trim()) {
+      return res.status(400).json({ ok: false, message: 'id и full_name обязательны' });
+    }
+    const result = await pool.query(
+      'UPDATE workers SET full_name = $1 WHERE id = $2 RETURNING *',
+      [full_name.trim(), workerId]
+    );
+    if (!result.rows[0]) return res.status(404).json({ ok: false, message: 'Рабочий не найден' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('UPDATE WORKER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить рабочего' });
+  }
+});
+
+app.delete('/api/workers/:id', async (req, res) => {
+  try {
+    const workerId = toInt(req.params.id);
+    await pool.query('DELETE FROM workers WHERE id = $1', [workerId]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('DELETE WORKER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось удалить рабочего' });
+  }
+});
+
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const userId = toInt(req.params.id);
+    const { full_name, login, password, role } = req.body;
+    if (!userId || !full_name?.trim() || !login?.trim() || !role?.trim()) {
+      return res.status(400).json({ ok: false, message: 'Не все обязательные поля заполнены' });
+    }
+    const dbRoleMap = {
+      'Администратор': 'admin',
+      'Контролер': 'controller',
+      'Контрольный мастер': 'quality_master',
+      'Производственный мастер': 'production_master',
+    };
+    const dbRole = dbRoleMap[role] || role;
+    const result = password?.trim()
+      ? await pool.query(
+          'UPDATE users SET full_name = $1, login = $2, password_hash = $3, role = $4 WHERE id = $5 RETURNING id, full_name, login, role',
+          [full_name.trim(), login.trim(), password.trim(), dbRole, userId]
+        )
+      : await pool.query(
+          'UPDATE users SET full_name = $1, login = $2, role = $3 WHERE id = $4 RETURNING id, full_name, login, role',
+          [full_name.trim(), login.trim(), dbRole, userId]
+        );
+    if (!result.rows[0]) return res.status(404).json({ ok: false, message: 'Пользователь не найден' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('UPDATE USER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить пользователя' });
+  }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    const userId = toInt(req.params.id);
+    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('DELETE USER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось удалить пользователя' });
+  }
+});
+
 app.get('/api/batches', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -289,6 +362,31 @@ app.post('/api/batches/:id/accept', async (req, res) => {
   }
 });
 
+
+app.post('/api/batches/:id/mark-ready-to-send', async (req, res) => {
+  try {
+    const batchId = toInt(req.params.id);
+    const editorId = toInt(req.body.editor_id);
+    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (String(batch.created_by || '') !== String(editorId || '')) {
+      return res.status(403).json({ ok: false, message: 'Подготовить к отправке может только создатель партии' });
+    }
+    if (batch.status !== 'Проверена') {
+      return res.status(400).json({ ok: false, message: 'Подготовить к отправке можно только проверенную партию' });
+    }
+    const result = await pool.query(
+      `UPDATE batches SET status = 'Готова к отправке' WHERE id = $1 RETURNING *`,
+      [batchId]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('MARK READY TO SEND ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось перевести партию в статус "Готова к отправке"' });
+  }
+});
+
 app.post('/api/batches/:id/send-to-assembly', async (req, res) => {
   try {
     const batchId = toInt(req.params.id);
@@ -299,8 +397,8 @@ app.post('/api/batches/:id/send-to-assembly', async (req, res) => {
     if (String(batch.created_by || '') !== String(editorId || '')) {
       return res.status(403).json({ ok: false, message: 'Отправить на сборку может только создатель партии' });
     }
-    if (batch.status !== 'Проверена') {
-      return res.status(400).json({ ok: false, message: 'На сборку можно отправить только проверенную партию' });
+    if (batch.status !== 'Готова к отправке') {
+      return res.status(400).json({ ok: false, message: 'На сборку можно отправить только партию со статусом "Готова к отправке"' });
     }
     const result = await pool.query(
       `UPDATE batches SET status = 'Отправлено на сборку' WHERE id = $1 RETURNING *`,
@@ -479,7 +577,7 @@ app.post('/api/inspections', async (req, res) => {
     const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [batch_id]);
     const batch = batchResult.rows[0];
     if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    if (batch.status === 'Отправлено на сборку') {
+    if (batch.status === 'Готова к отправке' || batch.status === 'Отправлено на сборку') {
       return res.status(400).json({ ok: false, message: 'Партия уже отправлена на сборку' });
     }
     if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(resolvedInspectorId)) {
@@ -544,7 +642,7 @@ app.put('/api/inspections/:id', async (req, res) => {
     const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [inspection.batch_id]);
     const batch = batchResult.rows[0];
     if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    if (batch.status === 'Отправлено на сборку') {
+    if (batch.status === 'Готова к отправке' || batch.status === 'Отправлено на сборку') {
       return res.status(400).json({ ok: false, message: 'После отправки на сборку контроль менять нельзя' });
     }
     if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(editorId)) {
