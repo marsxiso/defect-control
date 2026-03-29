@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 
 type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор';
 type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Отправлено на сборку';
@@ -38,6 +39,7 @@ type Batch = {
   creatorName?: string;
   inspectorId?: string;
   inspectorName?: string;
+  acceptedByUserId?: string;
 };
 
 type DefectItem = {
@@ -135,6 +137,7 @@ type ApiBatchRow = {
   full_name?: string | null;
   inspector_id?: number | string | null;
   inspector_name?: string | null;
+  accepted_by_user_id?: number | string | null;
 };
 
 type ApiShiftRow = {
@@ -429,6 +432,7 @@ export default function App() {
 
   const [shiftDate, setShiftDate] = useState(todayStr());
   const [shiftEmployeeName, setShiftEmployeeName] = useState('');
+  const [showShiftDatePicker, setShowShiftDatePicker] = useState(false);
 
   const [reportDateFrom, setReportDateFrom] = useState('');
   const [reportDateTo, setReportDateTo] = useState('');
@@ -447,6 +451,12 @@ export default function App() {
     () => inspections.find((item) => item.batchId === selectedBatchId) || null,
     [inspections, selectedBatchId],
   );
+
+  const selectedBatchAcceptedByCurrentUser = useMemo(() => {
+    if (!currentUser || !selectedBatch) return false;
+    if (!selectedBatch.acceptedByUserId) return false;
+    return selectedBatch.acceptedByUserId === currentUser.id;
+  }, [currentUser, selectedBatch]);
 
   const reportSelectedBatch = useMemo(
     () => batches.find((b) => b.id === reportSelectedBatchId) || null,
@@ -540,6 +550,14 @@ export default function App() {
     return !batchCanBeEditedByCurrentUser;
   }, [selectedBatch, selectedInspection, batchCanBeEditedByCurrentUser]);
 
+  const onChangeShiftDate = (event: DateTimePickerEvent, selectedDate?: Date) => {
+    setShowShiftDatePicker(false);
+    if (event.type === 'dismissed' || !selectedDate) return;
+    setShiftDate(formatDate(selectedDate));
+  };
+
+  const openShiftDatePicker = () => setShowShiftDatePicker(true);
+
   const syncAllFromServer = async () => {
     const [usersRes, workersRes, batchesRes, shiftsRes, inspectionsRes] = await Promise.all([
       fetch(`${API_URL}/api/users`),
@@ -584,6 +602,7 @@ export default function App() {
       creatorName: item.creator_name || undefined,
       inspectorId: item.inspector_id != null ? String(item.inspector_id) : undefined,
       inspectorName: item.inspector_name || undefined,
+      acceptedByUserId: item.accepted_by_user_id != null ? String(item.accepted_by_user_id) : undefined,
     })));
 
     setShifts((shiftsData as ApiShiftRow[]).map((item) => ({
@@ -923,6 +942,7 @@ export default function App() {
     const payload = {
       batch_id: Number(selectedBatch.id),
       inspector_id: Number(currentUser.id),
+      inspector_name: currentUser.name,
       editor_id: Number(currentUser.id),
       visual_conclusion: inspectionForm.visualConclusion.trim(),
       geometry_conclusion: inspectionForm.geometryConclusion.trim(),
@@ -956,6 +976,31 @@ export default function App() {
       Alert.alert('Готово', selectedInspection ? 'Контроль обновлен' : 'Контроль сохранен');
     } catch {
       Alert.alert('Ошибка', 'Не удалось сохранить контроль');
+    }
+  };
+
+  const acceptBatchForInspection = async (batch: Batch) => {
+    if (!currentUser) return;
+    if (currentUser.role === 'Контролер' && !currentUserOnControlShift) {
+      Alert.alert('Недоступно', 'Контролер может принимать партии только если он назначен на смену сегодня');
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/batches/${batch.id}/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: Number(currentUser.id) }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось принять партию');
+        return;
+      }
+      await syncAllFromServer();
+      setSelectedBatchId(batch.id);
+      setScreen('inspection');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось принять партию');
     }
   };
 
@@ -1096,6 +1141,12 @@ export default function App() {
     const inspection = inspections.find((item) => item.batchId === batch.id);
     const canEditBatch = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к проверке';
     const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
+    const canAcceptBatch =
+      mode === 'list' &&
+      (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер' || currentUser?.role === 'Администратор') &&
+      batch.status === 'Готова к проверке' &&
+      !batch.acceptedByUserId &&
+      (currentUser?.role !== 'Контролер' || currentUserOnControlShift);
 
     return (
       <View key={`${mode}-${batch.id}`} style={styles.card}>
@@ -1111,6 +1162,10 @@ export default function App() {
         <Text style={styles.text}>Дата: {batch.manufactureDate}</Text>
         <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
         {!!batch.creatorName && <Text style={styles.text}>Создал: {batch.creatorName}</Text>}
+        {!!batch.acceptedByUserId && (
+          <Text style={styles.text}>Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : 'другой сотрудник'}</Text>
+        )}
+        {!!batch.inspectorName && <Text style={styles.text}>Проверил: {batch.inspectorName}</Text>}
         {inspection && renderInspectionPreview(inspection)}
 
         {mode === 'report' && inspection && (
@@ -1124,6 +1179,12 @@ export default function App() {
               ))
             )}
           </View>
+        )}
+
+        {mode === 'list' && canAcceptBatch && (
+          <Pressable style={styles.primaryButton} onPress={() => acceptBatchForInspection(batch)}>
+            <Text style={styles.primaryButtonText}>Принять партию</Text>
+          </Pressable>
         )}
 
         {mode === 'list' && canEditBatch && (
@@ -1145,6 +1206,7 @@ export default function App() {
       </View>
     );
   };
+
 
   if (cameraOpen) {
     return (
@@ -1179,12 +1241,6 @@ export default function App() {
     currentUser?.role === 'Контрольный мастер' ||
     currentUser?.role === 'Администратор';
 
-  const inspectionCandidateBatches = batches.filter((batch) => {
-    if (batch.status === 'Отправлено на сборку') return false;
-    if (batch.status === 'Готова к проверке') return true;
-    if (batch.status === 'Проверена' && batch.inspectorId === currentUser?.id) return true;
-    return batch.id === selectedBatchId;
-  });
 
   if (!appReady) {
     return (
@@ -1294,6 +1350,12 @@ export default function App() {
                 </View>
               )}
 
+              {currentUser.role === 'Контролер' && !currentUserOnControlShift && (
+                <View style={[styles.card, styles.warningCard]}>
+                  <Text style={styles.warningText}>Вы не назначены на смену на сегодня, поэтому не можете принять новую партию.</Text>
+                </View>
+              )}
+
               {visibleBatchesPage.length === 0 ? (
                 <View style={styles.card}><Text style={styles.text}>Нет партий для отображения.</Text></View>
               ) : (
@@ -1310,23 +1372,8 @@ export default function App() {
                   <Text style={styles.warningText}>Контролер не назначен на смену сегодня и не может принимать новые партии.</Text>
                 </View>
               )}
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Выберите партию для контроля</Text>
-                <View style={styles.roleRow}>
-                  {inspectionCandidateBatches.length === 0 ? (
-                    <Text style={styles.text}>Нет доступных партий.</Text>
-                  ) : (
-                    inspectionCandidateBatches.map((batch) => (
-                      <Pressable key={batch.id} style={[styles.roleButton, selectedBatchId === batch.id && styles.roleButtonActive]} onPress={() => setSelectedBatchId(batch.id)}>
-                        <Text style={[styles.roleButtonText, selectedBatchId === batch.id && styles.roleButtonTextActive]}>{batch.productName} #{batch.id}</Text>
-                      </Pressable>
-                    ))
-                  )}
-                </View>
-              </View>
-
               {!selectedBatch ? (
-                <View style={styles.card}><Text style={styles.text}>Сначала выберите партию.</Text></View>
+                <View style={styles.card}><Text style={styles.text}>Сначала примите партию в разделе «Партии».</Text></View>
               ) : (
                 <>
                   <View style={styles.card}>
@@ -1335,6 +1382,7 @@ export default function App() {
                     <Text style={styles.text}>Количество: {selectedBatch.quantity}</Text>
                     <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
+                    {!!selectedBatch.acceptedByUserId && <Text style={styles.text}>Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : 'другой сотрудник'}</Text>}
                     {selectedInspection && <Text style={styles.text}>Проверил: {selectedInspection.inspector}</Text>}
                   </View>
 
@@ -1452,6 +1500,11 @@ export default function App() {
                   {!!reportSelectedInspection && (
                     <>
                       <Text style={styles.text}>Проверил: {reportSelectedInspection.inspector}</Text>
+                      <Text style={styles.text}>Дата контроля: {reportSelectedInspection.date}</Text>
+                      <Text style={styles.text}>Визуальный контроль: {reportSelectedInspection.visualConclusion || '—'}</Text>
+                      <Text style={styles.text}>Параметры: {reportSelectedInspection.geometryConclusion || '—'}</Text>
+                      <Text style={styles.text}>Годных изделий: {reportSelectedInspection.acceptedCount}</Text>
+                      <Text style={styles.text}>Бракованных изделий: {reportSelectedInspection.rejectedCount}</Text>
                       <Text style={styles.text}>Комментарий: {reportSelectedInspection.comment || '—'}</Text>
                       <Text style={styles.cardSubTitle}>Обнаруженные дефекты</Text>
                       {reportSelectedInspection.defects.length === 0 ? (
@@ -1460,6 +1513,7 @@ export default function App() {
                         reportSelectedInspection.defects.map((defect) => (
                           <View key={defect.id} style={styles.historyItem}>
                             <Text style={styles.text}><Text style={styles.textBold}>{defect.defectClass}</Text> — {defect.affectedCount} шт.</Text>
+                            <Text style={styles.text}>Уверенность AI: {(defect.confidence * 100).toFixed(1)}%</Text>
                             <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
                             {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
                           </View>
@@ -1499,7 +1553,12 @@ export default function App() {
                   {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : 'Отметить выход на смену'}
                 </Text>
                 <Label text="Дата" />
-                <TextInput style={styles.input} value={shiftDate} onChangeText={setShiftDate} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} />
+                <Pressable style={styles.datePickerButton} onPress={openShiftDatePicker}>
+                  <Text style={styles.datePickerButtonText}>{shiftDate || 'Выбрать дату'}</Text>
+                </Pressable>
+                {showShiftDatePicker && (
+                  <DateTimePicker value={new Date(shiftDate)} mode="date" display="default" onChange={onChangeShiftDate} />
+                )}
                 <Label text={selectedScheduleEmployeeType === 'worker' ? 'Рабочий' : 'Контролер'} />
                 <View style={styles.roleRow}>
                   {scheduleCandidates.map((employee) => (
@@ -1619,6 +1678,8 @@ const styles = StyleSheet.create({
   roleButtonText: { color: COLORS.text, fontWeight: '600' },
   roleButtonTextActive: { color: '#082f49', fontWeight: '800' },
   disabledButton: { opacity: 0.55 },
+  datePickerButton: { width: '100%', backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 14, marginBottom: 8 },
+  datePickerButtonText: { color: COLORS.text, fontSize: 14 },
   cameraScreen: { flex: 1, backgroundColor: 'black' },
   cameraPreview: { flex: 1 },
   cameraOverlay: { flex: 1, justifyContent: 'space-between', padding: 20, backgroundColor: 'rgba(0,0,0,0.15)' },

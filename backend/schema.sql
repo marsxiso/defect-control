@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS shifts (
   id SERIAL PRIMARY KEY,
   shift_date DATE NOT NULL,
   shift_type TEXT NOT NULL DEFAULT 'day',
-  employee_type TEXT NOT NULL,
+  employee_type TEXT NOT NULL DEFAULT 'worker',
   worker_id INTEGER REFERENCES workers(id) ON DELETE CASCADE,
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS inspections (
   id SERIAL PRIMARY KEY,
   batch_id INTEGER NOT NULL UNIQUE REFERENCES batches(id) ON DELETE CASCADE,
   inspector_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  inspector_name TEXT NOT NULL DEFAULT '',
   inspection_date DATE NOT NULL DEFAULT CURRENT_DATE,
   visual_conclusion TEXT DEFAULT '',
   geometry_conclusion TEXT DEFAULT '',
@@ -62,14 +63,46 @@ CREATE TABLE IF NOT EXISTS inspection_defects (
 
 ALTER TABLE batches ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE batches ADD COLUMN IF NOT EXISTS assigned_worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS accepted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS employee_type TEXT;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS worker_id INTEGER REFERENCES workers(id) ON DELETE CASCADE;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-
-UPDATE shifts SET employee_type = COALESCE(employee_type, CASE WHEN user_id IS NOT NULL THEN 'controller' ELSE 'worker' END);
-
-ALTER TABLE batches ADD COLUMN IF NOT EXISTS accepted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS employee_name TEXT;
-UPDATE shifts SET employee_name = COALESCE(employee_name, 'Не указан');
+
+ALTER TABLE inspections ADD COLUMN IF NOT EXISTS inspector_name TEXT;
+ALTER TABLE inspections ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE shifts ALTER COLUMN worker_id DROP NOT NULL;
+ALTER TABLE shifts ALTER COLUMN user_id DROP NOT NULL;
+ALTER TABLE shifts ALTER COLUMN employee_type SET DEFAULT 'worker';
+
+UPDATE shifts
+SET employee_type = COALESCE(
+  NULLIF(employee_type, ''),
+  CASE WHEN user_id IS NOT NULL THEN 'controller' ELSE 'worker' END
+);
+
+UPDATE shifts
+SET employee_name = COALESCE(
+  NULLIF(employee_name, ''),
+  CASE
+    WHEN worker_id IS NOT NULL THEN (SELECT w.full_name FROM workers w WHERE w.id = shifts.worker_id)
+    WHEN user_id IS NOT NULL THEN (SELECT u.full_name FROM users u WHERE u.id = shifts.user_id)
+    ELSE 'Не указан'
+  END
+);
+
+UPDATE inspections i
+SET inspector_name = COALESCE(
+  NULLIF(i.inspector_name, ''),
+  u.full_name
+)
+FROM users u
+WHERE u.id = i.inspector_id
+  AND (i.inspector_name IS NULL OR i.inspector_name = '');
+
+ALTER TABLE inspections ALTER COLUMN inspector_name SET DEFAULT '';
+ALTER TABLE inspections ALTER COLUMN inspector_name SET NOT NULL;

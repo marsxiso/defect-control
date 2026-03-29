@@ -462,13 +462,19 @@ app.post('/api/inspections', async (req, res) => {
     } = req.body;
 
     let resolvedInspectorId = toInt(inspector_id);
-    if (!resolvedInspectorId && inspector_name) {
-      const inspectorResult = await client.query('SELECT id FROM users WHERE full_name = $1 LIMIT 1', [inspector_name]);
+    let resolvedInspectorName = (inspector_name || '').trim();
+    if (!resolvedInspectorId && resolvedInspectorName) {
+      const inspectorResult = await client.query('SELECT id, full_name FROM users WHERE full_name = $1 LIMIT 1', [resolvedInspectorName]);
       resolvedInspectorId = toInt(inspectorResult.rows[0]?.id);
+      resolvedInspectorName = inspectorResult.rows[0]?.full_name || resolvedInspectorName;
+    }
+    if (resolvedInspectorId) {
+      const inspectorResult = await client.query('SELECT full_name FROM users WHERE id = $1 LIMIT 1', [resolvedInspectorId]);
+      resolvedInspectorName = inspectorResult.rows[0]?.full_name || resolvedInspectorName;
     }
 
-    if (!batch_id || !resolvedInspectorId) {
-      return res.status(400).json({ ok: false, message: 'batch_id и inspector_id обязательны' });
+    if (!batch_id || !resolvedInspectorId || !resolvedInspectorName) {
+      return res.status(400).json({ ok: false, message: 'batch_id, inspector_id и inspector_name обязательны' });
     }
 
     const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [batch_id]);
@@ -489,11 +495,20 @@ app.post('/api/inspections', async (req, res) => {
     await client.query('BEGIN');
     const inserted = await client.query(
       `INSERT INTO inspections (
-        batch_id, inspector_id, inspection_date, visual_conclusion, geometry_conclusion,
+        batch_id, inspector_id, inspector_name, inspection_date, visual_conclusion, geometry_conclusion,
         accepted_count, rejected_count, comment
-      ) VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6, $7)
+      ) VALUES ($1, $2, $3, CURRENT_DATE, $4, $5, $6, $7, $8)
       RETURNING *`,
-      [batch_id, resolvedInspectorId, visual_conclusion || '', geometry_conclusion || '', accepted_count || 0, rejected_count || 0, comment || '']
+      [
+        batch_id,
+        resolvedInspectorId,
+        resolvedInspectorName,
+        visual_conclusion || '',
+        geometry_conclusion || '',
+        accepted_count || 0,
+        rejected_count || 0,
+        comment || '',
+      ]
     );
     const inspection = inserted.rows[0];
 
