@@ -317,6 +317,23 @@ function todayStr() {
   return formatDate(new Date());
 }
 
+function formatDisplayDate(value?: string) {
+  if (!value) return '—';
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    const [, y, m, d] = match;
+    return `${d}.${m}.${y.slice(-2)}`;
+  }
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    const d = String(parsed.getDate()).padStart(2, '0');
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const y = String(parsed.getFullYear()).slice(-2);
+    return `${d}.${m}.${y}`;
+  }
+  return String(value);
+}
+
 function uid(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
@@ -374,7 +391,13 @@ function StatCard({ title, value }: { title: string; value: string }) {
 
 function StatusBadge({ status }: { status: BatchStatus }) {
   const backgroundColor =
-    status === 'Готова к проверке' ? '#2563eb' : status === 'Проверена' ? '#15803d' : '#6b7280';
+    status === 'Готова к проверке'
+      ? '#2563eb'
+      : status === 'Проверена'
+      ? '#15803d'
+      : status === 'Готова к отправке'
+      ? '#f59e0b'
+      : '#6b7280';
   return (
     <View style={[styles.badge, { backgroundColor }]}>
       <Text style={styles.badgeText}>{status}</Text>
@@ -407,6 +430,7 @@ export default function App() {
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
   const [reportSelectedBatchId, setReportSelectedBatchId] = useState<string | null>(null);
+  const [isControlEditMode, setIsControlEditMode] = useState(false);
 
   const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
   const [newWorkerName, setNewWorkerName] = useState('');
@@ -460,6 +484,44 @@ export default function App() {
     return selectedBatch.acceptedByUserId === currentUser.id;
   }, [currentUser, selectedBatch]);
 
+  const acceptedBatchForCurrentUser = useMemo(
+    () =>
+      currentUser
+        ? batches.find(
+            (b) =>
+              b.acceptedByUserId === currentUser.id &&
+              b.status !== 'Готова к отправке' &&
+              b.status !== 'Отправлено на сборку',
+          ) || null
+        : null,
+    [batches, currentUser],
+  );
+
+  const canCancelAcceptedBatch = useMemo(
+    () =>
+      !!(
+        currentUser &&
+        selectedBatch &&
+        selectedBatch.acceptedByUserId === currentUser.id &&
+        !selectedInspection &&
+        selectedBatch.status === 'Готова к проверке'
+      ),
+    [currentUser, selectedBatch, selectedInspection],
+  );
+
+  const canEditInspectionByCurrentUser = useMemo(
+    () =>
+      !!(
+        currentUser &&
+        selectedInspection &&
+        selectedInspection.inspectorId === currentUser.id &&
+        selectedBatch &&
+        selectedBatch.status !== 'Готова к отправке' &&
+        selectedBatch.status !== 'Отправлено на сборку'
+      ),
+    [currentUser, selectedInspection, selectedBatch],
+  );
+
   const reportSelectedBatch = useMemo(
     () => batches.find((b) => b.id === reportSelectedBatchId) || null,
     [batches, reportSelectedBatchId],
@@ -483,9 +545,7 @@ export default function App() {
   );
 
   const visibleBatchesPage = useMemo(
-    () => [...batches]
-      .filter((b) => b.status !== 'Отправлено на сборку' && b.status !== 'Готова к отправке')
-      .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
+    () => [...batches].filter((b) => b.status !== 'Отправлено на сборку').sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
     [batches],
   );
 
@@ -522,6 +582,17 @@ export default function App() {
     return grouped;
   }, [reportBatches]);
 
+
+  const filteredBatchesForCurrentUser = useMemo(() => {
+    if (!currentUser) return visibleBatchesPage;
+    if (currentUser.role === 'Контролер' || currentUser.role === 'Контрольный мастер') {
+      return visibleBatchesPage.filter(
+        (b) => !b.acceptedByUserId || b.acceptedByUserId === currentUser.id,
+      );
+    }
+    return visibleBatchesPage;
+  }, [visibleBatchesPage, currentUser]);
+
   const visibleShifts = useMemo(
     () => shifts
       .filter((s) => !shiftDate || String(s.date).slice(0, 10) === shiftDate)
@@ -550,7 +621,7 @@ export default function App() {
 
   const batchCanBeEditedByCurrentUser = useMemo(() => {
     if (!currentUser || !selectedBatch) return false;
-    if (selectedBatch.status === 'Готова к отправке' || selectedBatch.status === 'Отправлено на сборку') return false;
+    if (selectedBatch.status === 'Отправлено на сборку') return false;
     if (!selectedInspection) return false;
     return selectedInspection.inspectorId === currentUser.id;
   }, [currentUser, selectedBatch, selectedInspection]);
@@ -559,8 +630,9 @@ export default function App() {
     if (!selectedBatch) return true;
     if (selectedBatch.status === 'Готова к отправке' || selectedBatch.status === 'Отправлено на сборку') return true;
     if (!selectedInspection) return false;
-    return !batchCanBeEditedByCurrentUser;
-  }, [selectedBatch, selectedInspection, batchCanBeEditedByCurrentUser]);
+    if (!canEditInspectionByCurrentUser) return true;
+    return !isControlEditMode;
+  }, [selectedBatch, selectedInspection, canEditInspectionByCurrentUser, isControlEditMode]);
 
   const onChangeShiftDate = (event: DateTimePickerEvent, selectedDate?: Date) => {
     setShowShiftDatePicker(false);
@@ -687,7 +759,16 @@ export default function App() {
     setDetectedDefects(inspection.defects);
     setDefectComment('');
     setInferenceState({ loading: false, defect: 'Неопределено', confidence: 0, summary: '' });
+    setIsControlEditMode(false);
   }, [selectedBatchId, inspections]);
+
+
+  useEffect(() => {
+    if (!currentUser || selectedBatchId) return;
+    if (acceptedBatchForCurrentUser) {
+      setSelectedBatchId(acceptedBatchForCurrentUser.id);
+    }
+  }, [currentUser, acceptedBatchForCurrentUser, selectedBatchId]);
 
   const handleLogin = async () => {
     try {
@@ -820,7 +901,7 @@ export default function App() {
             const response = await fetch(`${API_URL}/api/batches/${batch.id}`, {
               method: 'DELETE',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_id: Number(currentUser.id) }),
+              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
             });
             const data = await readJson(response);
             if (!response.ok) {
@@ -843,20 +924,17 @@ export default function App() {
       const response = await fetch(`${API_URL}/api/batches/${batch.id}/mark-ready-to-send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ editor_id: Number(currentUser.id) }),
+        body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
       });
       const data = await readJson(response);
       if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось подготовить партию к отправке');
+        Alert.alert('Ошибка', data?.message || 'Не удалось перевести партию в статус «Готова к отправке»');
         return;
       }
       await syncAllFromServer();
-      setScreen('report');
-      setReportSelectedBatchId(batch.id);
-      if (selectedBatchId === batch.id) setSelectedBatchId(null);
-      Alert.alert('Готово', 'Партия перенесена в отчеты со статусом «Готова к отправке»');
+      Alert.alert('Готово', 'Партия переведена в статус «Готова к отправке»');
     } catch {
-      Alert.alert('Ошибка', 'Не удалось подготовить партию к отправке');
+      Alert.alert('Ошибка', 'Не удалось обновить статус партии');
     }
   };
 
@@ -866,7 +944,7 @@ export default function App() {
       const response = await fetch(`${API_URL}/api/batches/${batch.id}/send-to-assembly`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ editor_id: Number(currentUser.id) }),
+        body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
       });
       const data = await readJson(response);
       if (!response.ok) {
@@ -1009,6 +1087,7 @@ export default function App() {
       }
       await syncAllFromServer();
       setSelectedBatchId(selectedBatch.id);
+      setIsControlEditMode(false);
       Alert.alert('Готово', selectedInspection ? 'Контроль обновлен' : 'Контроль сохранен');
     } catch {
       Alert.alert('Ошибка', 'Не удалось сохранить контроль');
@@ -1038,6 +1117,42 @@ export default function App() {
     } catch {
       Alert.alert('Ошибка', 'Не удалось принять партию');
     }
+  };
+
+
+  const goToInspection = (batch: Batch) => {
+    setSelectedBatchId(batch.id);
+    setScreen('inspection');
+  };
+
+  const cancelAcceptedBatch = async (batch: Batch) => {
+    if (!currentUser) return;
+    Alert.alert('Отменить контроль', `Отменить принятие партии ${batch.batchNumber}?`, [
+      { text: 'Нет', style: 'cancel' },
+      {
+        text: 'Да',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/batches/${batch.id}/cancel-accept`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user_id: Number(currentUser.id) }),
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось отменить контроль');
+              return;
+            }
+            await syncAllFromServer();
+            if (selectedBatchId === batch.id) setSelectedBatchId(null);
+            setScreen('batches');
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось отменить контроль');
+          }
+        },
+      },
+    ]);
   };
 
   const addWorker = async () => {
@@ -1139,7 +1254,7 @@ export default function App() {
             const response = await fetch(`${API_URL}/api/shifts/${shift.id}`, {
               method: 'DELETE',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_id: Number(currentUser.id) }),
+              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
             });
             const data = await readJson(response);
             if (!response.ok) {
@@ -1165,7 +1280,7 @@ export default function App() {
     return (
       <View style={styles.cardSoft}>
         <Text style={styles.cardSubTitle}>Последний контроль</Text>
-        <Text style={styles.text}>Дата контроля: {inspection.date}</Text>
+        <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection.date)}</Text>
         <Text style={styles.text}>Проверил: {inspection.inspector}</Text>
         <Text style={styles.text}>Годных: {inspection.acceptedCount}</Text>
         <Text style={styles.text}>Бракованных: {inspection.rejectedCount}</Text>
@@ -1175,17 +1290,11 @@ export default function App() {
 
   const renderBatchCard = (batch: Batch, mode: 'list' | 'report' = 'list') => {
     const inspection = inspections.find((item) => item.batchId === batch.id);
+    const isExpandedReportCard = mode === 'report' && reportSelectedBatchId === batch.id;
     const canEditBatch = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к проверке';
-    const canMarkReadyToSend =
-      mode === 'list' &&
-      currentUser?.role === 'Производственный мастер' &&
-      batch.createdBy === currentUser.id &&
-      batch.status === 'Проверена';
-    const canSendToAssembly =
-      mode === 'report' &&
-      currentUser?.role === 'Производственный мастер' &&
-      batch.createdBy === currentUser.id &&
-      batch.status === 'Готова к отправке';
+    const canMarkReadyToSend = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
+    const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к отправке';
+    const canDeleteAnyBatch = currentUser?.role === 'Администратор';
     const canAcceptBatch =
       mode === 'list' &&
       (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер' || currentUser?.role === 'Администратор') &&
@@ -1193,10 +1302,27 @@ export default function App() {
       !batch.acceptedByUserId &&
       (currentUser?.role !== 'Контролер' || currentUserOnControlShift);
 
+    const canGoToInspection =
+      mode === 'list' &&
+      !!currentUser &&
+      batch.acceptedByUserId === currentUser.id &&
+      batch.status !== 'Готова к отправке' &&
+      batch.status !== 'Отправлено на сборку';
+
+    const onOpenCard = () => {
+      if (mode === 'report') {
+        setReportSelectedBatchId((prev) => (prev === batch.id ? null : batch.id));
+      } else if (canGoToInspection) {
+        goToInspection(batch);
+      } else {
+        setSelectedBatchId(batch.id);
+      }
+    };
+
     return (
       <View key={`${mode}-${batch.id}`} style={styles.card}>
         <View style={styles.rowBetween}>
-          <Pressable onPress={() => mode === 'report' ? openReportBatch(batch.id) : setSelectedBatchId(batch.id)}>
+          <Pressable onPress={onOpenCard}>
             <Text style={[styles.cardTitle, mode === 'report' && styles.linkText]}>{batch.productName}</Text>
           </Pressable>
           <StatusBadge status={batch.status} />
@@ -1204,19 +1330,31 @@ export default function App() {
         <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
         <Text style={styles.text}>ID партии: {batch.id}</Text>
         <Text style={styles.text}>Количество: {batch.quantity}</Text>
-        <Text style={styles.text}>Дата: {batch.manufactureDate}</Text>
+        <Text style={styles.text}>Дата: {formatDisplayDate(batch.manufactureDate)}</Text>
         <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
-        {!!batch.creatorName && <Text style={styles.text}>Создал: {batch.creatorName}</Text>}
         {inspection && renderInspectionPreview(inspection)}
 
-        {mode === 'report' && inspection && (
+        {mode === 'report' && isExpandedReportCard && inspection && (
           <View style={styles.cardSoft}>
+            <Text style={styles.cardSubTitle}>Данные контроля</Text>
+            <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection.date)}</Text>
+            <Text style={styles.text}>Проверил: {inspection.inspector}</Text>
+            <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
+            <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
+            <Text style={styles.text}>Годных изделий: {inspection.acceptedCount}</Text>
+            <Text style={styles.text}>Бракованных изделий: {inspection.rejectedCount}</Text>
+            <Text style={styles.text}>Комментарий: {inspection.comment || '—'}</Text>
             <Text style={styles.cardSubTitle}>Обнаруженные дефекты</Text>
             {inspection.defects.length === 0 ? (
               <Text style={styles.text}>Дефекты не зафиксированы.</Text>
             ) : (
               inspection.defects.map((defect) => (
-                <Text key={defect.id} style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
+                <View key={defect.id} style={styles.historyItem}>
+                  <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
+                  <Text style={styles.text}>Уверенность AI: {(defect.confidence * 100).toFixed(1)}%</Text>
+                  <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
+                  {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
+                </View>
               ))
             )}
           </View>
@@ -1226,6 +1364,19 @@ export default function App() {
           <Pressable style={styles.primaryButton} onPress={() => acceptBatchForInspection(batch)}>
             <Text style={styles.primaryButtonText}>Принять партию</Text>
           </Pressable>
+        )}
+
+        {mode === 'list' && canGoToInspection && (
+          <>
+            <Pressable style={styles.primaryButton} onPress={() => goToInspection(batch)}>
+              <Text style={styles.primaryButtonText}>Перейти к контролю</Text>
+            </Pressable>
+            {!inspection && (
+              <Pressable style={styles.secondaryButton} onPress={() => cancelAcceptedBatch(batch)}>
+                <Text style={styles.secondaryButtonText}>Отменить контроль</Text>
+              </Pressable>
+            )}
+          </>
         )}
 
         {mode === 'list' && canEditBatch && (
@@ -1239,15 +1390,21 @@ export default function App() {
           </View>
         )}
 
-        {canMarkReadyToSend && (
+        {mode === 'list' && canMarkReadyToSend && (
           <Pressable style={styles.primaryButton} onPress={() => markBatchReadyToSend(batch)}>
             <Text style={styles.primaryButtonText}>Подготовить к отправке</Text>
           </Pressable>
         )}
 
-        {canSendToAssembly && (
+        {mode === 'report' && canSendToAssembly && (
           <Pressable style={styles.primaryButton} onPress={() => sendBatchToAssembly(batch)}>
             <Text style={styles.primaryButtonText}>Отправить на сборку</Text>
+          </Pressable>
+        )}
+
+        {mode === 'list' && canDeleteAnyBatch && (
+          <Pressable style={styles.dangerButton} onPress={() => deleteBatch(batch)}>
+            <Text style={styles.dangerButtonText}>Удалить запись</Text>
           </Pressable>
         )}
       </View>
@@ -1403,10 +1560,10 @@ export default function App() {
                 </View>
               )}
 
-              {visibleBatchesPage.length === 0 ? (
+              {filteredBatchesForCurrentUser.length === 0 ? (
                 <View style={styles.card}><Text style={styles.text}>Нет партий для отображения.</Text></View>
               ) : (
-                visibleBatchesPage.map((batch) => renderBatchCard(batch, 'list'))
+                filteredBatchesForCurrentUser.map((batch) => renderBatchCard(batch, 'list'))
               )}
             </View>
           )}
@@ -1429,13 +1586,11 @@ export default function App() {
                     <Text style={styles.text}>Количество: {selectedBatch.quantity}</Text>
                     <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
-                    {!!selectedBatch.acceptedByUserId && <Text style={styles.text}>Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : 'другой сотрудник'}</Text>}
-                    {selectedInspection && <Text style={styles.text}>Проверил: {selectedInspection.inspector}</Text>}
                   </View>
 
                   {selectedBatch.status === 'Проверена' && selectedInspection && selectedInspection.inspectorId !== currentUser.id && (
                     <View style={[styles.card, styles.warningCard]}>
-                      <Text style={styles.warningText}>Партия уже проверена. Изменять ее до статуса «Готова к отправке» может только {selectedInspection.inspector}.</Text>
+                      <Text style={styles.warningText}>Партия уже проверена. Изменять ее до отправки на сборку может только {selectedInspection.inspector}.</Text>
                     </View>
                   )}
 
@@ -1453,6 +1608,11 @@ export default function App() {
 
                   <View style={styles.card}>
                     <Text style={styles.cardTitle}>Результаты контроля</Text>
+                    {selectedInspection && canEditInspectionByCurrentUser && !isControlEditMode && (
+                      <Pressable style={styles.secondaryButton} onPress={() => setIsControlEditMode(true)}>
+                        <Text style={styles.secondaryButtonText}>Изменить</Text>
+                      </Pressable>
+                    )}
                     <Label text="Изображение для анализа" />
                     {!inspectionForm.imageUri && !inspectionLocked && (
                       <>
@@ -1553,7 +1713,7 @@ export default function App() {
                   {!!reportSelectedInspection && (
                     <>
                       <Text style={styles.text}>Проверил: {reportSelectedInspection.inspector}</Text>
-                      <Text style={styles.text}>Дата контроля: {reportSelectedInspection.date}</Text>
+                      <Text style={styles.text}>Дата контроля: {formatDisplayDate(reportSelectedInspection.date)}</Text>
                       <Text style={styles.text}>Визуальный контроль: {reportSelectedInspection.visualConclusion || '—'}</Text>
                       <Text style={styles.text}>Параметры: {reportSelectedInspection.geometryConclusion || '—'}</Text>
                       <Text style={styles.text}>Годных изделий: {reportSelectedInspection.acceptedCount}</Text>
@@ -1579,12 +1739,16 @@ export default function App() {
 
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Готовы к отправке</Text>
-                {readyToSendBatches.length === 0 ? <Text style={styles.text}>Нет партий, готовых к отправке.</Text> : readyToSendBatches.map((batch) => renderBatchCard(batch, 'report'))}
+                {readyToSendBatches.length === 0 ? (
+                  <Text style={styles.text}>Нет партий, готовых к отправке.</Text>
+                ) : (
+                  readyToSendBatches.map((batch) => renderBatchCard(batch, 'list'))
+                )}
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Отправлены на сборку за последний месяц</Text>
-                {recentArchive.length === 0 ? <Text style={styles.text}>Нет отправленных партий за последний месяц.</Text> : recentArchive.map((batch) => renderBatchCard(batch, 'report'))}
+                <Text style={styles.cardTitle}>Отчёты за последний месяц</Text>
+                {recentArchive.length === 0 ? <Text style={styles.text}>Нет отчётов за последний месяц.</Text> : recentArchive.map((batch) => renderBatchCard(batch, 'report'))}
               </View>
 
               <View style={styles.card}>
@@ -1642,7 +1806,7 @@ export default function App() {
                     .filter((shift) => currentUser.role === 'Администратор' || (currentUser.role === 'Производственный мастер' ? shift.employeeType === 'worker' : currentUser.role === 'Контрольный мастер' ? shift.employeeType === 'controller' : true))
                     .map((shift) => (
                       <View key={shift.id} style={styles.historyItem}>
-                        <Text style={styles.text}><Text style={styles.textBold}>{shift.date}</Text></Text>
+                        <Text style={styles.text}><Text style={styles.textBold}>{formatDisplayDate(shift.date)}</Text></Text>
                         <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
                         <Text style={styles.text}>Тип: {shift.roleLabel || (shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер')}</Text>
                         {shift.assignedBy === currentUser.id && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
@@ -1749,3 +1913,4 @@ const styles = StyleSheet.create({
   warningText: { color: '#fde68a', fontWeight: '600', lineHeight: 20 },
   linkText: { textDecorationLine: 'underline', color: COLORS.accent2 },
 });
+

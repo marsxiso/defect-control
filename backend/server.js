@@ -243,14 +243,13 @@ app.delete('/api/batches/:id', async (req, res) => {
   try {
     const batchId = toInt(req.params.id);
     const editorId = toInt(req.body.editor_id || req.query.editor_id);
+    const editorRole = req.body.editor_role || req.query.editor_role;
     const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
     const batch = batchResult.rows[0];
     if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    if (String(batch.created_by || '') !== String(editorId || '')) {
+    const isAdmin = editorRole === 'Администратор' || editorRole === 'admin';
+    if (!isAdmin && String(batch.created_by || '') !== String(editorId || '')) {
       return res.status(403).json({ ok: false, message: 'Можно удалять только свои партии' });
-    }
-    if (batch.status !== 'Готова к проверке') {
-      return res.status(400).json({ ok: false, message: 'Проверенную партию удалить нельзя' });
     }
     await pool.query('DELETE FROM batches WHERE id = $1', [batchId]);
     res.json({ ok: true });
@@ -289,6 +288,38 @@ app.post('/api/batches/:id/accept', async (req, res) => {
   }
 });
 
+
+app.post('/api/batches/:id/cancel-accept', async (req, res) => {
+  try {
+    const batchId = toInt(req.params.id);
+    const userId = toInt(req.body.user_id);
+    if (!batchId || !userId) {
+      return res.status(400).json({ ok: false, message: 'batch_id и user_id обязательны' });
+    }
+
+    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
+    const batch = batchResult.rows[0];
+    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
+    if (String(batch.accepted_by_user_id || '') !== String(userId)) {
+      return res.status(403).json({ ok: false, message: 'Отменить контроль может только принявший сотрудник' });
+    }
+
+    const inspectionResult = await pool.query('SELECT id FROM inspections WHERE batch_id = $1 LIMIT 1', [batchId]);
+    if (inspectionResult.rows.length > 0) {
+      return res.status(400).json({ ok: false, message: 'Нельзя отменить контроль после сохранения проверки' });
+    }
+
+    const updated = await pool.query(
+      'UPDATE batches SET accepted_by_user_id = NULL WHERE id = $1 RETURNING *',
+      [batchId]
+    );
+    res.json(updated.rows[0]);
+  } catch (error) {
+    console.error('CANCEL ACCEPT BATCH ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось отменить контроль' });
+  }
+});
+
 app.post('/api/batches/:id/mark-ready-to-send', async (req, res) => {
   try {
     const batchId = toInt(req.params.id);
@@ -324,7 +355,7 @@ app.post('/api/batches/:id/send-to-assembly', async (req, res) => {
       return res.status(403).json({ ok: false, message: 'Отправить на сборку может только создатель партии' });
     }
     if (batch.status !== 'Готова к отправке') {
-      return res.status(400).json({ ok: false, message: 'На сборку можно отправить только партию со статусом "Готова к отправке"' });
+      return res.status(400).json({ ok: false, message: 'На сборку можно отправить только партию со статусом «Готова к отправке»' });
     }
     const result = await pool.query(
       `UPDATE batches SET status = 'Отправлено на сборку' WHERE id = $1 RETURNING *`,
@@ -343,7 +374,12 @@ app.get('/api/shifts', async (req, res) => {
       SELECT
         s.*,
         COALESCE(w.full_name, u.full_name, s.employee_name) AS full_name,
-        COALESCE(s.employee_type, CASE WHEN s.user_id IS NOT NULL THEN 'controller' ELSE 'worker' END) AS employee_type
+        COALESCE(s.employee_type, CASE WHEN s.user_id IS NOT NULL THEN 'controller' ELSE 'worker' END) AS employee_type,
+        CASE
+          WHEN s.user_id IS NOT NULL AND u.role IN ('Контрольный мастер', 'quality_master', 'control_master') THEN 'Контрольный мастер'
+          WHEN s.user_id IS NOT NULL THEN 'Контролер'
+          ELSE 'Рабочий'
+        END AS role_label
       FROM shifts s
       LEFT JOIN workers w ON s.worker_id = w.id
       LEFT JOIN users u ON s.user_id = u.id
@@ -424,6 +460,7 @@ app.delete('/api/shifts/:id', async (req, res) => {
   try {
     const shiftId = toInt(req.params.id);
     const editorId = toInt(req.body.editor_id || req.query.editor_id);
+    const editorRole = req.body.editor_role || req.query.editor_role;
     const shiftResult = await pool.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
     const shift = shiftResult.rows[0];
     if (!shift) return res.status(404).json({ ok: false, message: 'Смена не найдена' });
@@ -498,8 +535,8 @@ app.post('/api/inspections', async (req, res) => {
     const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [batch_id]);
     const batch = batchResult.rows[0];
     if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    if (batch.status === 'Отправлено на сборку') {
-      return res.status(400).json({ ok: false, message: 'Партия уже отправлена на сборку' });
+    if (batch.status === 'Готова к отправке' || batch.status === 'Отправлено на сборку') {
+      return res.status(400).json({ ok: false, message: 'Партия уже недоступна для редактирования контроля' });
     }
     if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(resolvedInspectorId)) {
       return res.status(403).json({ ok: false, message: 'Сохранять контроль может только сотрудник, принявший партию' });
@@ -563,8 +600,8 @@ app.put('/api/inspections/:id', async (req, res) => {
     const batchResult = await client.query('SELECT * FROM batches WHERE id = $1', [inspection.batch_id]);
     const batch = batchResult.rows[0];
     if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    if (batch.status === 'Отправлено на сборку') {
-      return res.status(400).json({ ok: false, message: 'После отправки на сборку контроль менять нельзя' });
+    if (batch.status === 'Готова к отправке' || batch.status === 'Отправлено на сборку') {
+      return res.status(400).json({ ok: false, message: 'После подготовки к отправке контроль менять нельзя' });
     }
     if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(editorId)) {
       return res.status(403).json({ ok: false, message: 'Изменять контроль может только сотрудник, принявший партию' });
