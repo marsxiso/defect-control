@@ -5,183 +5,202 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const axios = require('axios');
-const bcrypt = require('bcrypt');
 const { Pool } = require('pg');
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
-const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(cors());
 app.use(express.json());
 
-if (!process.env.DATABASE_URL) {
-  console.warn('DATABASE_URL is not set. Database connection will fail until it is configured.');
-}
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: isProduction ? { rejectUnauthorized: false } : false,
+  ssl: { rejectUnauthorized: false },
 });
 
-function mapUserRow(user) {
-  return {
-    id: user.id,
-    login: user.login,
-    role: user.role,
-    full_name: user.full_name,
-  };
-}
-
+// ================= ROOT
 app.get('/', (req, res) => {
-  res.json({
-    ok: true,
-    message: 'Defect AI backend is running',
-    health: '/api/health',
-    users: '/users',
-    apiUsers: '/api/users',
-  });
+  res.json({ ok: true, message: 'Server is running' });
 });
 
+// ================= HEALTH
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
     res.json({ ok: true, message: 'Server + DB OK' });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: 'DB connection error', error: error.message });
   }
 });
 
+// ================= LOGIN
 app.post('/auth/login', async (req, res) => {
-  const { login, password } = req.body;
-
-  if (!login || !password) {
-    return res.status(400).json({ ok: false, message: 'Укажите логин и пароль' });
-  }
-
   try {
-    const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
+    const { login, password } = req.body;
+
+    if (!login || !password) {
+      return res.status(400).json({ ok: false, message: 'Введите логин и пароль' });
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM users WHERE login = $1 AND password_hash = $2',
+      [login, password]
+    );
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ ok: false, message: 'Пользователь не найден' });
+      return res.status(401).json({ ok: false, message: 'Неверный логин или пароль' });
     }
 
     const user = result.rows[0];
-    const isValid = await bcrypt.compare(password, user.password_hash);
-
-    if (!isValid) {
-      return res.status(401).json({ ok: false, message: 'Неверный пароль' });
-    }
 
     res.json({
       ok: true,
       token: 'ok',
-      user: mapUserRow(user),
+      user: {
+        id: user.id,
+        login: user.login,
+        full_name: user.full_name,
+        role: user.role,
+      },
     });
-  } catch (err) {
-    console.error(err);
+  } catch (error) {
+    console.error('LOGIN ERROR:', error);
     res.status(500).json({ ok: false, message: 'Ошибка сервера' });
   }
 });
 
-async function getUsersHandler(req, res) {
+// ================= USERS
+app.get('/api/users', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT id, login, full_name, role FROM users ORDER BY COALESCE(full_name, login)'
-    );
+    const result = await pool.query('SELECT * FROM users ORDER BY id');
     res.json(result.rows);
-  } catch (err) {
-    console.error(err);
+  } catch (error) {
+    console.error('GET USERS ERROR:', error);
     res.status(500).json({ ok: false, message: 'Не удалось получить пользователей' });
   }
-}
+});
 
-app.get('/users', getUsersHandler);
-app.get('/api/users', getUsersHandler);
-
-async function createUserHandler(req, res) {
-  const { login, password, full_name, role } = req.body;
-  const nextRole = role || 'user';
-  const nextFullName = full_name || login;
-
-  if (!login || !password) {
-    return res.status(400).json({ ok: false, message: 'Заполните login и password' });
-  }
-
+// ================= WORKERS
+app.get('/api/workers', async (req, res) => {
   try {
-    const hash = await bcrypt.hash(password, 10);
+    const result = await pool.query('SELECT * FROM workers ORDER BY id');
+    res.json(result.rows);
+  } catch (error) {
+    console.error('GET WORKERS ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось получить рабочих' });
+  }
+});
+
+app.post('/api/workers', async (req, res) => {
+  try {
+    const { full_name } = req.body;
+
+    if (!full_name) {
+      return res.status(400).json({ ok: false, message: 'full_name обязателен' });
+    }
 
     const result = await pool.query(
-      `INSERT INTO users (login, password_hash, full_name, role)
+      'INSERT INTO workers (full_name) VALUES ($1) RETURNING *',
+      [full_name]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('CREATE WORKER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось добавить рабочего' });
+  }
+});
+
+// ================= BATCHES
+app.get('/api/batches', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM batches ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (error) {
+    console.error('GET BATCHES ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось получить партии' });
+  }
+});
+
+app.post('/api/batches', async (req, res) => {
+  try {
+    const { batch_number, product_name, quantity, created_by } = req.body;
+
+    if (!batch_number || !product_name) {
+      return res.status(400).json({ ok: false, message: 'batch_number и product_name обязательны' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO batches (batch_number, product_name, quantity, created_by)
        VALUES ($1, $2, $3, $4)
-       RETURNING id, login, full_name, role`,
-      [login, hash, nextFullName, nextRole]
+       RETURNING *`,
+      [batch_number, product_name, quantity || 0, created_by || null]
     );
 
-    res.status(201).json({ ok: true, user: result.rows[0] });
-  } catch (err) {
-    console.error(err);
-
-    if (err.code === '23505') {
-      return res.status(409).json({ ok: false, message: 'Пользователь с таким login уже существует' });
-    }
-
-    res.status(500).json({ ok: false, message: 'Не удалось создать пользователя' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('CREATE BATCH ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось создать партию' });
   }
-}
+});
 
-app.post('/users', createUserHandler);
-app.post('/api/users', createUserHandler);
-app.post('/api/register', createUserHandler);
-
-async function updatePasswordHandler(req, res) {
-  const { password } = req.body;
-  const { id } = req.params;
-
-  if (!password) {
-    return res.status(400).json({ ok: false, message: 'Введите пароль' });
-  }
-
+// ================= SHIFTS
+app.get('/api/shifts', async (req, res) => {
   try {
-    const hash = await bcrypt.hash(password, 10);
+    const result = await pool.query(`
+      SELECT s.*, w.full_name, b.batch_number
+      FROM shifts s
+      JOIN workers w ON s.worker_id = w.id
+      JOIN batches b ON s.batch_id = b.id
+      ORDER BY s.id DESC
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('GET SHIFTS ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось получить смены' });
+  }
+});
+
+app.post('/api/shifts', async (req, res) => {
+  try {
+    const { worker_id, batch_id, shift_date, shift_type, assigned_by } = req.body;
+
+    if (!worker_id || !batch_id || !shift_date || !shift_type) {
+      return res.status(400).json({
+        ok: false,
+        message: 'worker_id, batch_id, shift_date и shift_type обязательны',
+      });
+    }
 
     const result = await pool.query(
-      'UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id',
-      [hash, id]
+      `INSERT INTO shifts (worker_id, batch_id, shift_date, shift_type, assigned_by)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [worker_id, batch_id, shift_date, shift_type, assigned_by || null]
     );
 
-    if (result.rowCount === 0) {
-      return res.status(404).json({ ok: false, message: 'Пользователь не найден' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('CREATE SHIFT ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось создать смену' });
+  }
+});
+
+// ================= AI
+app.post('/analyze-defect', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, message: 'Файл не загружен' });
     }
 
-    res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, message: 'Не удалось обновить пароль' });
-  }
-}
-
-app.patch('/users/:id/password', updatePasswordHandler);
-app.patch('/api/users/:id/password', updatePasswordHandler);
-
-app.post('/analyze-defect', upload.single('file'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ ok: false, error: 'Файл не загружен' });
-  }
-
-  try {
     const image = fs.readFileSync(req.file.path, { encoding: 'base64' });
 
     const response = await axios({
       method: 'POST',
       url: process.env.ROBOFLOW_MODEL_URL,
-      params: {
-        api_key: process.env.ROBOFLOW_API_KEY,
-      },
+      params: { api_key: process.env.ROBOFLOW_API_KEY },
       data: image,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
 
     if (fs.existsSync(req.file.path)) {
@@ -189,14 +208,14 @@ app.post('/analyze-defect', upload.single('file'), async (req, res) => {
     }
 
     res.json(response.data);
-  } catch (err) {
-    console.error(err.message);
+  } catch (error) {
+    console.error('AI ERROR:', error?.response?.data || error.message);
 
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
 
-    res.status(500).json({ ok: false, error: 'Ошибка анализа изображения' });
+    res.status(500).json({ ok: false, message: 'Ошибка анализа изображения' });
   }
 });
 
