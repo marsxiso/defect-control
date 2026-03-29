@@ -117,7 +117,6 @@ const monthNames: Record<string, string> = {
 };
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://defect-ai-backend.onrender.com';
-const AI_API_URL = `${API_URL}/analyze-defect`;
 
 type RoboflowPrediction = {
   class?: string;
@@ -504,7 +503,7 @@ async function loadAllDb() {
 
 
 async function syncUsersFromServer() {
-  const response = await fetch(`${API_URL}/users`);
+  const response = await fetch(`${API_URL}/api/users`);
   const rawText = await response.text();
 
   let data: any = [];
@@ -1182,7 +1181,7 @@ const sendBatchToAssembly = async (batchId: string) => {
       setInferenceState({ loading: false, defect: 'Неопределено', confidence: 0, summary: '' });
       Alert.alert(
         'Ошибка AI-анализа',
-        `${message}\n\nПроверьте AI_API_URL в App.tsx и запущен ли сервер анализа.`
+        `${message}\n\nПроверьте API_URL в App.tsx и доступность backend-сервера.`
       );
     }
   };
@@ -1287,7 +1286,7 @@ const sendBatchToAssembly = async (batchId: string) => {
     }
 
     try {
-      const response = await fetch(`${API_URL}/users`, {
+      const response = await fetch(`${API_URL}/api/users`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1335,7 +1334,7 @@ const sendBatchToAssembly = async (batchId: string) => {
     }
 
     try {
-      const response = await fetch(`${API_URL}/users/${userId}/password`, {
+      const response = await fetch(`${API_URL}/api/users/${userId}/password`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -2514,7 +2513,7 @@ const styles = StyleSheet.create({
   },
   captureButton: {
     backgroundColor: 'white',
-    borderRadius: 16,
+    borderRadius: 16,Проверьте API_URL в App.tsx и доступность backend-сервера.
     paddingVertical: 14,
     alignItems: 'center',
     marginBottom: 12,
