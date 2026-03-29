@@ -3,9 +3,6 @@
     "name": "defect-control-app",
     "slug": "defect-control-app",
     "version": "1.0.0",
-    "plugins": [
-      "expo-sqlite"
-    ],
     "android": {
       "usesCleartextTraffic": true
     }

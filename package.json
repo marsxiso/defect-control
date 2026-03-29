@@ -1,22 +1,19 @@
 {
-  "name": "defect-ai-backend",
+  "name": "defect-control-app",
   "version": "1.0.0",
-  "main": "server.js",
+  "main": "node_modules/expo/AppEntry.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "expo start",
+    "android": "expo start --android",
+    "web": "expo start --web"
   },
   "dependencies": {
-    "axios": "^1.13.6",
-    "bcrypt": "^5.1.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
-    "pg": "^8.11.5"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.7"
+    "@types/react": "~18.2.79",
+    "expo": "~51.0.0",
+    "expo-camera": "~15.0.0",
+    "expo-image-picker": "~15.0.0",
+    "react": "18.2.0",
+    "react-native": "0.74.0",
+    "typescript": "~5.3.3"
   }
 }
