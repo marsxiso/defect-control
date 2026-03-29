@@ -13,7 +13,6 @@ import {
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор';
 type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Отправлено на сборку';
@@ -87,6 +86,7 @@ type Shift = {
   employeeType: ShiftEmployeeType;
   assigneeId: string;
   assignedBy?: string;
+  roleLabel?: string;
 };
 
 type RoboflowPrediction = {
@@ -150,6 +150,7 @@ type ApiShiftRow = {
   full_name: string;
   employee_type: ShiftEmployeeType;
   assigned_by?: number | string | null;
+  role_label?: string | null;
 };
 
 type ApiInspectionDefectRow = {
@@ -176,7 +177,6 @@ type ApiInspectionRow = {
 };
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://defect-control.onrender.com';
-const AUTH_STORAGE_KEY = 'lizun_auth_session';
 
 const COLORS = {
   bg: '#0f172a',
@@ -435,13 +435,9 @@ export default function App() {
   const [shiftDate, setShiftDate] = useState(todayStr());
   const [shiftEmployeeName, setShiftEmployeeName] = useState('');
   const [showShiftDatePicker, setShowShiftDatePicker] = useState(false);
-  const [scheduleEmployeeType, setScheduleEmployeeType] = useState<ShiftEmployeeType>('worker');
 
   const [reportDateFrom, setReportDateFrom] = useState('');
   const [reportDateTo, setReportDateTo] = useState('');
-  const [editingUserId, setEditingUserId] = useState<string | null>(null);
-  const [userForm, setUserForm] = useState({ name: '', login: '', password: '', role: 'Контролер' as Role });
-
 
   const controllers = useMemo(
     () => users.filter((user) => user.role === 'Контролер' || user.role === 'Контрольный мастер'),
@@ -618,6 +614,7 @@ export default function App() {
       employeeType: item.employee_type,
       assigneeId: item.employee_type === 'worker' ? String(item.worker_id) : String(item.user_id),
       assignedBy: item.assigned_by != null ? String(item.assigned_by) : undefined,
+      roleLabel: item.role_label || (item.employee_type === 'worker' ? 'Рабочий' : 'Контролер'),
     })));
 
     setInspections((inspectionsData as ApiInspectionRow[]).map((item) => ({
@@ -646,13 +643,6 @@ export default function App() {
     let mounted = true;
     (async () => {
       try {
-        const storedSession = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
-        if (storedSession && mounted) {
-          const parsed = JSON.parse(storedSession);
-          if (parsed?.currentUser) {
-            setCurrentUser(parsed.currentUser);
-          }
-        }
         await syncAllFromServer();
         if (mounted) setAppReady(true);
       } catch (error) {
@@ -667,20 +657,6 @@ export default function App() {
       mounted = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (!currentUser || users.length === 0) return;
-    const freshUser = users.find((user) => user.id === currentUser.id);
-    if (!freshUser) return;
-    if (
-      freshUser.name !== currentUser.name ||
-      freshUser.login !== currentUser.login ||
-      freshUser.role !== currentUser.role
-    ) {
-      setCurrentUser(freshUser);
-      AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ currentUser: freshUser })).catch(() => {});
-    }
-  }, [users, currentUser]);
 
   useEffect(() => {
     if (!selectedBatchId) return;
@@ -716,14 +692,12 @@ export default function App() {
         return;
       }
       setToken(data.token);
-      const nextUser = {
+      setCurrentUser({
         id: String(data.user.id),
         login: data.user.login || login.trim(),
         name: data.user.full_name,
         role: mapApiRoleToAppRole(data.user.role),
-      };
-      setCurrentUser(nextUser);
-      await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ currentUser: nextUser }));
+      });
       setScreen('dashboard');
       await syncAllFromServer();
     } catch {
@@ -731,8 +705,7 @@ export default function App() {
     }
   };
 
-  const handleLogout = async () => {
-    await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
+  const handleLogout = () => {
     setCurrentUser(null);
     setSelectedBatchId(null);
     setEditingBatchId(null);
@@ -747,48 +720,6 @@ export default function App() {
   const resetBatchForm = () => {
     setEditingBatchId(null);
     setNewBatch({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
-  };
-
-  const resetUserForm = () => {
-    setEditingUserId(null);
-    setUserForm({ name: '', login: '', password: '', role: 'Контролер' });
-  };
-
-  const editUser = (user: User) => {
-    setEditingUserId(user.id);
-    setUserForm({ name: user.name, login: user.login, password: '', role: user.role });
-    setScreen('admin');
-  };
-
-  const saveUser = async () => {
-    if (!currentUser || currentUser.role !== 'Администратор' || !editingUserId) return;
-    if (!userForm.name.trim() || !userForm.login.trim()) {
-      Alert.alert('Ошибка', 'Имя и логин обязательны');
-      return;
-    }
-    try {
-      const response = await fetch(`${API_URL}/api/users/${editingUserId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          editor_role: currentUser.role,
-          full_name: userForm.name.trim(),
-          login: userForm.login.trim(),
-          password: userForm.password.trim(),
-          role: userForm.role,
-        }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось обновить пользователя');
-        return;
-      }
-      await syncAllFromServer();
-      resetUserForm();
-      Alert.alert('Готово', 'Пользователь обновлен');
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось обновить пользователя');
-    }
   };
 
   const createOrUpdateBatch = async () => {
@@ -879,7 +810,7 @@ export default function App() {
             const response = await fetch(`${API_URL}/api/batches/${batch.id}`, {
               method: 'DELETE',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+              body: JSON.stringify({ editor_id: Number(currentUser.id) }),
             });
             const data = await readJson(response);
             if (!response.ok) {
@@ -1097,42 +1028,8 @@ export default function App() {
     Alert.alert('Готово', 'Рабочий добавлен');
   };
 
-  const deleteWorker = (worker: Worker) => {
-    if (!currentUser || currentUser.role !== 'Администратор') return;
-    Alert.alert('Удаление рабочего', `Удалить рабочего ${worker.name}?`, [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Удалить',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const response = await fetch(`${API_URL}/api/workers/${worker.id}`, {
-              method: 'DELETE',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_role: currentUser.role }),
-            });
-            const data = await readJson(response);
-            if (!response.ok) {
-              Alert.alert('Ошибка', data?.message || 'Не удалось удалить рабочего');
-              return;
-            }
-            await syncAllFromServer();
-            Alert.alert('Готово', 'Рабочий удален');
-          } catch {
-            Alert.alert('Ошибка', 'Не удалось удалить рабочего');
-          }
-        },
-      },
-    ]);
-  };
-
-
   const selectedScheduleEmployeeType: ShiftEmployeeType =
-    currentUser?.role === 'Администратор'
-      ? scheduleEmployeeType
-      : currentUser?.role === 'Контрольный мастер'
-        ? 'controller'
-        : 'worker';
+    currentUser?.role === 'Контрольный мастер' ? 'controller' : 'worker';
 
   const scheduleCandidates = selectedScheduleEmployeeType === 'worker' ? workers : controllers;
 
@@ -1153,7 +1050,7 @@ export default function App() {
         const response = await fetch(`${API_URL}/api/shifts/${editingShiftId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ shift_date: shiftDate, editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+          body: JSON.stringify({ shift_date: shiftDate, editor_id: Number(currentUser.id) }),
         });
         const data = await readJson(response);
         if (!response.ok) {
@@ -1209,7 +1106,7 @@ export default function App() {
             const response = await fetch(`${API_URL}/api/shifts/${shift.id}`, {
               method: 'DELETE',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+              body: JSON.stringify({ editor_id: Number(currentUser.id) }),
             });
             const data = await readJson(response);
             if (!response.ok) {
@@ -1267,10 +1164,9 @@ export default function App() {
         <Text style={styles.text}>Количество: {batch.quantity}</Text>
         <Text style={styles.text}>Дата: {batch.manufactureDate}</Text>
         <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
+        {!!batch.creatorName && <Text style={styles.text}>Создал: {batch.creatorName}</Text>}
         {!!batch.acceptedByUserId && (
-          <Text style={styles.text}>
-            Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : users.find((u) => u.id === batch.acceptedByUserId)?.name || 'Неизвестно'}
-          </Text>
+          <Text style={styles.text}>Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : 'другой сотрудник'}</Text>
         )}
         {!!batch.inspectorName && <Text style={styles.text}>Проверил: {batch.inspectorName}</Text>}
         {inspection && renderInspectionPreview(inspection)}
@@ -1396,8 +1292,8 @@ export default function App() {
               <Text style={styles.topRole}>{currentUser.role}</Text>
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
-            <Pressable style={styles.iconButton} onPress={handleLogout}>
-              <Text style={styles.iconButtonText}>⎋</Text>
+            <Pressable style={styles.secondaryButton} onPress={handleLogout}>
+              <Text style={styles.secondaryButtonText}>Выход</Text>
             </Pressable>
           </View>
 
@@ -1489,11 +1385,7 @@ export default function App() {
                     <Text style={styles.text}>Количество: {selectedBatch.quantity}</Text>
                     <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
-                    {!!selectedBatch.acceptedByUserId && (
-                      <Text style={styles.text}>
-                        Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : users.find((u) => u.id === selectedBatch.acceptedByUserId)?.name || 'Неизвестно'}
-                      </Text>
-                    )}
+                    {!!selectedBatch.acceptedByUserId && <Text style={styles.text}>Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : 'другой сотрудник'}</Text>}
                     {selectedInspection && <Text style={styles.text}>Проверил: {selectedInspection.inspector}</Text>}
                   </View>
 
@@ -1661,33 +1553,8 @@ export default function App() {
               <SectionTitle title="Смены" />
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>
-                  {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : currentUser.role === 'Администратор' ? 'Управление сменами' : 'Отметить выход на смену'}
+                  {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : 'Отметить выход на смену'}
                 </Text>
-                {currentUser.role === 'Администратор' && !editingShiftId && (
-                  <>
-                    <Label text="Тип сотрудника" />
-                    <View style={styles.roleRow}>
-                      <Pressable
-                        style={[styles.roleButton, selectedScheduleEmployeeType === 'worker' && styles.roleButtonActive]}
-                        onPress={() => {
-                          setScheduleEmployeeType('worker');
-                          setShiftEmployeeName('');
-                        }}
-                      >
-                        <Text style={[styles.roleButtonText, selectedScheduleEmployeeType === 'worker' && styles.roleButtonTextActive]}>Рабочий</Text>
-                      </Pressable>
-                      <Pressable
-                        style={[styles.roleButton, selectedScheduleEmployeeType === 'controller' && styles.roleButtonActive]}
-                        onPress={() => {
-                          setScheduleEmployeeType('controller');
-                          setShiftEmployeeName('');
-                        }}
-                      >
-                        <Text style={[styles.roleButtonText, selectedScheduleEmployeeType === 'controller' && styles.roleButtonTextActive]}>Контролер / мастер</Text>
-                      </Pressable>
-                    </View>
-                  </>
-                )}
                 <Label text="Дата" />
                 <Pressable style={styles.datePickerButton} onPress={openShiftDatePicker}>
                   <Text style={styles.datePickerButtonText}>{shiftDate || 'Выбрать дату'}</Text>
@@ -1722,8 +1589,8 @@ export default function App() {
                       <View key={shift.id} style={styles.historyItem}>
                         <Text style={styles.text}><Text style={styles.textBold}>{shift.date}</Text></Text>
                         <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
-                        <Text style={styles.text}>Тип: {shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер'}</Text>
-                        {(currentUser.role === 'Администратор' || shift.assignedBy === currentUser.id) && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
+                        <Text style={styles.text}>Тип: {shift.roleLabel || (shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер')}</Text>
+                        {shift.assignedBy === currentUser.id && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
                           <View style={styles.actionsWrap}>
                             <Pressable style={styles.secondaryButton} onPress={() => editShift(shift)}><Text style={styles.secondaryButtonText}>Редактировать</Text></Pressable>
                             <Pressable style={styles.dangerButton} onPress={() => deleteShift(shift)}><Text style={styles.dangerButtonText}>Удалить</Text></Pressable>
@@ -1741,42 +1608,11 @@ export default function App() {
               <SectionTitle title="Панель администратора" />
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Пользователи</Text>
-                {editingUserId && (
-                  <>
-                    <Label text="Имя" />
-                    <TextInput style={styles.input} value={userForm.name} onChangeText={(value) => setUserForm((prev) => ({ ...prev, name: value }))} />
-                    <Label text="Логин" />
-                    <TextInput style={styles.input} value={userForm.login} onChangeText={(value) => setUserForm((prev) => ({ ...prev, login: value }))} autoCapitalize="none" />
-                    <Label text="Новый пароль" />
-                    <TextInput style={styles.input} value={userForm.password} onChangeText={(value) => setUserForm((prev) => ({ ...prev, password: value }))} placeholder="Оставьте пустым, чтобы не менять" placeholderTextColor={COLORS.muted} secureTextEntry />
-                    <Label text="Роль" />
-                    <View style={styles.roleRow}>
-                      {(['Администратор', 'Производственный мастер', 'Контрольный мастер', 'Контролер'] as Role[]).map((roleOption) => (
-                        <Pressable
-                          key={roleOption}
-                          style={[styles.roleButton, userForm.role === roleOption && styles.roleButtonActive]}
-                          onPress={() => setUserForm((prev) => ({ ...prev, role: roleOption }))}
-                        >
-                          <Text style={[styles.roleButtonText, userForm.role === roleOption && styles.roleButtonTextActive]}>{roleOption}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                    <Pressable style={styles.primaryButton} onPress={saveUser}>
-                      <Text style={styles.primaryButtonText}>Сохранить пользователя</Text>
-                    </Pressable>
-                    <Pressable style={styles.secondaryButton} onPress={resetUserForm}>
-                      <Text style={styles.secondaryButtonText}>Отменить редактирование</Text>
-                    </Pressable>
-                  </>
-                )}
                 {users.map((u) => (
                   <View key={u.id} style={styles.historyItem}>
                     <Text style={styles.text}><Text style={styles.textBold}>{u.name}</Text></Text>
                     <Text style={styles.text}>Логин: {u.login}</Text>
                     <Text style={styles.text}>Роль: {u.role}</Text>
-                    <Pressable style={styles.secondaryButton} onPress={() => editUser(u)}>
-                      <Text style={styles.secondaryButtonText}>Редактировать</Text>
-                    </Pressable>
                   </View>
                 ))}
               </View>
@@ -1786,12 +1622,7 @@ export default function App() {
                 <TextInput style={styles.input} value={newWorkerName} onChangeText={setNewWorkerName} />
                 <Pressable style={styles.primaryButton} onPress={addWorker}><Text style={styles.primaryButtonText}>Добавить рабочего</Text></Pressable>
                 {workers.map((worker) => (
-                  <View key={worker.id} style={styles.historyItem}>
-                    <Text style={styles.text}>{worker.name}</Text>
-                    <Pressable style={styles.dangerButton} onPress={() => deleteWorker(worker)}>
-                      <Text style={styles.dangerButtonText}>Удалить</Text>
-                    </Pressable>
-                  </View>
+                  <View key={worker.id} style={styles.historyItem}><Text style={styles.text}>{worker.name}</Text></View>
                 ))}
               </View>
             </View>
@@ -1811,8 +1642,6 @@ const styles = StyleSheet.create({
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   topRole: { color: COLORS.accent2, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8 },
   topName: { color: COLORS.text, fontSize: 20, fontWeight: '700', marginTop: 2 },
-  iconButton: { width: 42, height: 42, borderRadius: 12, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border, alignItems: 'center', justifyContent: 'center' },
-  iconButtonText: { color: COLORS.text, fontSize: 18, fontWeight: '800' },
   navRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 16, marginBottom: 18 },
   tabButton: { backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12, marginRight: 8, marginBottom: 8 },
   tabButtonActive: { backgroundColor: '#1d4ed8' },

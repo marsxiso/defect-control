@@ -30,10 +30,6 @@ function toInt(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function isAdminRole(role) {
-  return role === 'admin' || role === 'Администратор';
-}
-
 function mapInspectionRow(row) {
   return {
     id: String(row.id),
@@ -134,62 +130,6 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-app.put('/api/users/:id', async (req, res) => {
-  try {
-    const userId = toInt(req.params.id);
-    const { full_name, login, password, role, editor_role } = req.body;
-    if (!isAdminRole(editor_role)) {
-      return res.status(403).json({ ok: false, message: 'Редактировать пользователей может только администратор' });
-    }
-    if (!userId || !full_name || !login || !role) {
-      return res.status(400).json({ ok: false, message: 'Имя, логин и роль обязательны' });
-    }
-
-    const roleMap = {
-      'Администратор': 'admin',
-      'Производственный мастер': 'production_master',
-      'Контрольный мастер': 'quality_master',
-      'Контролер': 'controller',
-      admin: 'admin',
-      production_master: 'production_master',
-      quality_master: 'quality_master',
-      controller: 'controller',
-    };
-
-    const nextRole = roleMap[role] || role;
-
-    const duplicate = await pool.query('SELECT id FROM users WHERE login = $1 AND id <> $2', [login.trim(), userId]);
-    if (duplicate.rows.length > 0) {
-      return res.status(400).json({ ok: false, message: 'Такой логин уже используется' });
-    }
-
-    const result = password && String(password).trim()
-      ? await pool.query(
-          `UPDATE users
-           SET full_name = $1, login = $2, password_hash = $3, role = $4
-           WHERE id = $5
-           RETURNING *`,
-          [full_name.trim(), login.trim(), String(password).trim(), nextRole, userId]
-        )
-      : await pool.query(
-          `UPDATE users
-           SET full_name = $1, login = $2, role = $3
-           WHERE id = $4
-           RETURNING *`,
-          [full_name.trim(), login.trim(), nextRole, userId]
-        );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({ ok: false, message: 'Пользователь не найден' });
-    }
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error('UPDATE USER ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось обновить пользователя' });
-  }
-});
-
 app.get('/api/workers', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM workers ORDER BY full_name');
@@ -217,25 +157,6 @@ app.post('/api/workers', async (req, res) => {
   } catch (error) {
     console.error('CREATE WORKER ERROR:', error);
     res.status(500).json({ ok: false, message: 'Не удалось добавить рабочего' });
-  }
-});
-
-app.delete('/api/workers/:id', async (req, res) => {
-  try {
-    const workerId = toInt(req.params.id);
-    const { editor_role } = req.body || {};
-    if (!isAdminRole(editor_role)) {
-      return res.status(403).json({ ok: false, message: 'Удалять рабочих может только администратор' });
-    }
-    const existing = await pool.query('SELECT * FROM workers WHERE id = $1', [workerId]);
-    if (!existing.rows[0]) {
-      return res.status(404).json({ ok: false, message: 'Рабочий не найден' });
-    }
-    await pool.query('DELETE FROM workers WHERE id = $1', [workerId]);
-    res.json({ ok: true });
-  } catch (error) {
-    console.error('DELETE WORKER ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось удалить рабочего' });
   }
 });
 
@@ -322,7 +243,6 @@ app.delete('/api/batches/:id', async (req, res) => {
   try {
     const batchId = toInt(req.params.id);
     const editorId = toInt(req.body.editor_id || req.query.editor_id);
-    const editorRole = req.body.editor_role || req.query.editor_role;
     const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
     const batch = batchResult.rows[0];
     if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
@@ -399,7 +319,12 @@ app.get('/api/shifts', async (req, res) => {
       SELECT
         s.*,
         COALESCE(w.full_name, u.full_name, s.employee_name) AS full_name,
-        COALESCE(s.employee_type, CASE WHEN s.user_id IS NOT NULL THEN 'controller' ELSE 'worker' END) AS employee_type
+        COALESCE(s.employee_type, CASE WHEN s.user_id IS NOT NULL THEN 'controller' ELSE 'worker' END) AS employee_type,
+        CASE
+          WHEN s.user_id IS NOT NULL AND u.role IN ('Контрольный мастер', 'quality_master', 'control_master') THEN 'Контрольный мастер'
+          WHEN s.user_id IS NOT NULL THEN 'Контролер'
+          ELSE 'Рабочий'
+        END AS role_label
       FROM shifts s
       LEFT JOIN workers w ON s.worker_id = w.id
       LEFT JOIN users u ON s.user_id = u.id
@@ -455,11 +380,11 @@ app.put('/api/shifts/:id', async (req, res) => {
   try {
     const shiftId = toInt(req.params.id);
     const editorId = toInt(req.body.editor_id);
-    const { shift_date, editor_role } = req.body;
+    const { shift_date } = req.body;
     const shiftResult = await pool.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
     const shift = shiftResult.rows[0];
     if (!shift) return res.status(404).json({ ok: false, message: 'Смена не найдена' });
-    if (!isAdminRole(editor_role) && String(shift.assigned_by || '') !== String(editorId || '')) {
+    if (String(shift.assigned_by || '') !== String(editorId || '')) {
       return res.status(403).json({ ok: false, message: 'Можно редактировать только свои смены' });
     }
     const duplicate = shift.employee_type === 'worker'
@@ -483,7 +408,7 @@ app.delete('/api/shifts/:id', async (req, res) => {
     const shiftResult = await pool.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
     const shift = shiftResult.rows[0];
     if (!shift) return res.status(404).json({ ok: false, message: 'Смена не найдена' });
-    if (!isAdminRole(editorRole) && String(shift.assigned_by || '') !== String(editorId || '')) {
+    if (String(shift.assigned_by || '') !== String(editorId || '')) {
       return res.status(403).json({ ok: false, message: 'Можно удалять только свои смены' });
     }
     await pool.query('DELETE FROM shifts WHERE id = $1', [shiftId]);
