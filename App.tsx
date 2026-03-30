@@ -452,13 +452,13 @@ export default function App() {
   const [workerFormName, setWorkerFormName] = useState('');
 
   const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
+  const [showProductMenu, setShowProductMenu] = useState(false);
   const [newWorkerName, setNewWorkerName] = useState('');
   const [inspectionForm, setInspectionForm] = useState({
     visualConclusion: '',
     geometryConclusion: '',
     acceptedCount: '0',
     rejectedCount: '0',
-    comment: '',
     imageUri: '',
   });
   const [detectedDefects, setDetectedDefects] = useState<DefectItem[]>([]);
@@ -769,7 +769,7 @@ export default function App() {
     if (!selectedBatchId) return;
     const inspection = inspections.find((item) => item.batchId === selectedBatchId);
     if (!inspection) {
-      setInspectionForm({ visualConclusion: '', geometryConclusion: '', acceptedCount: '0', rejectedCount: '0', comment: '', imageUri: '' });
+      setInspectionForm({ visualConclusion: '', geometryConclusion: '', acceptedCount: '0', rejectedCount: '0', imageUri: '' });
       setDetectedDefects([]);
       return;
     }
@@ -778,7 +778,6 @@ export default function App() {
       geometryConclusion: inspection.geometryConclusion,
       acceptedCount: String(inspection.acceptedCount),
       rejectedCount: '0',
-      comment: inspection.comment,
       imageUri: '',
     });
     setDetectedDefects(inspection.defects);
@@ -834,18 +833,12 @@ export default function App() {
   };
 
   const chooseProductName = () => {
-    Alert.alert(
-      'Выберите изделие',
-      '',
-      PRODUCT_OPTIONS.map((option) => ({
-        text: option,
-        onPress: () => setNewBatch((prev) => ({ ...prev, productName: option })),
-      })).concat([{ text: 'Отмена', style: 'cancel' as const }]),
-    );
+    setShowProductMenu((prev) => !prev);
   };
 
   const resetBatchForm = () => {
     setEditingBatchId(null);
+    setShowProductMenu(false);
     setNewBatch({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
   };
 
@@ -922,6 +915,7 @@ export default function App() {
       manufactureDate: batch.manufactureDate,
       workerName: batch.workerName,
     });
+    setShowProductMenu(false);
     setScreen('batches');
   };
 
@@ -1098,7 +1092,7 @@ export default function App() {
       geometry_conclusion: inspectionForm.geometryConclusion.trim(),
       accepted_count: acceptedCount,
       rejected_count: rejectedTotal,
-      comment: inspectionForm.comment.trim(),
+      comment: '',
       defects: detectedDefects.map((item) => ({
         defect_class: item.defectClass,
         confidence: item.confidence,
@@ -1163,32 +1157,22 @@ export default function App() {
 
   const cancelAcceptedBatch = async (batch: Batch) => {
     if (!currentUser) return;
-    Alert.alert('Отменить контроль', `Отменить принятие партии ${batch.batchNumber}?`, [
-      { text: 'Нет', style: 'cancel' },
-      {
-        text: 'Да',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const response = await fetch(`${API_URL}/api/batches/${batch.id}/cancel-accept`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ user_id: Number(currentUser.id) }),
-            });
-            const data = await readJson(response);
-            if (!response.ok) {
-              Alert.alert('Ошибка', data?.message || 'Не удалось отменить контроль');
-              return;
-            }
-            await syncAllFromServer();
-            if (selectedBatchId === batch.id) setSelectedBatchId(null);
-            setScreen('batches');
-          } catch {
-            Alert.alert('Ошибка', 'Не удалось отменить контроль');
-          }
-        },
-      },
-    ]);
+    try {
+      const response = await fetch(`${API_URL}/api/batches/${batch.id}/cancel-accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: Number(currentUser.id) }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось отменить контроль');
+        return;
+      }
+      await syncAllFromServer();
+      if (selectedBatchId === batch.id) setSelectedBatchId(null);
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось отменить контроль');
+    }
   };
 
   const addWorker = async () => {
@@ -1494,12 +1478,15 @@ export default function App() {
           <StatusBadge status={batch.status} />
         </View>
         <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
-        <Text style={styles.text}>ID партии: {batch.id}</Text>
-        <Text style={styles.text}>Количество: {batch.quantity}</Text>
-        <Text style={styles.text}>Дата: {formatDisplayDate(batch.manufactureDate)}</Text>
-        <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
-        {mode === 'report' && batch.sentToAssemblyAt && <Text style={styles.text}>Отправлена: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>}
-        {inspection && renderInspectionPreview(inspection)}
+        <Text style={styles.text}>Дата: {formatDisplayDate(mode === 'report' && batch.sentToAssemblyAt ? batch.sentToAssemblyAt : batch.manufactureDate)}</Text>
+        {(mode !== 'report' || batch.status === 'Готова к отправке' || isExpandedReportCard) && (
+          <>
+            <Text style={styles.text}>Количество: {batch.quantity}</Text>
+            <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
+            {mode === 'report' && batch.sentToAssemblyAt && isExpandedReportCard && <Text style={styles.text}>Отправлена: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>}
+            {inspection && (mode !== 'report' || isExpandedReportCard || batch.status === 'Готова к отправке') && renderInspectionPreview(inspection)}
+          </>
+        )}
 
         {mode === 'report' && isExpandedReportCard && inspection && (
           <View style={styles.cardSoft}>
@@ -1510,7 +1497,6 @@ export default function App() {
             <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
             <Text style={styles.text}>Годных изделий: {inspection.acceptedCount}</Text>
             <Text style={styles.text}>Бракованных изделий: {inspection.rejectedCount}</Text>
-            <Text style={styles.text}>Комментарий: {inspection.comment || '—'}</Text>
             <Text style={styles.cardSubTitle}>Обнаруженные дефекты</Text>
             {inspection.defects.length === 0 ? (
               <Text style={styles.text}>Дефекты не зафиксированы.</Text>
@@ -1659,7 +1645,7 @@ export default function App() {
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
             <Pressable style={styles.iconButton} onPress={handleLogout}>
-              <Text style={styles.iconButtonText}>⎋</Text>
+              <Text style={styles.iconButtonText}>↩</Text>
             </Pressable>
           </View>
 
@@ -1695,6 +1681,22 @@ export default function App() {
                   <Pressable style={styles.datePickerButton} onPress={chooseProductName}>
                     <Text style={styles.datePickerButtonText}>{newBatch.productName || 'Выбрать изделие'}</Text>
                   </Pressable>
+                  {showProductMenu && (
+                    <View style={styles.dropdownMenu}>
+                      {PRODUCT_OPTIONS.map((option) => (
+                        <Pressable
+                          key={option}
+                          style={[styles.dropdownItem, newBatch.productName === option && styles.dropdownItemActive]}
+                          onPress={() => {
+                            setNewBatch((prev) => ({ ...prev, productName: option }));
+                            setShowProductMenu(false);
+                          }}
+                        >
+                          <Text style={[styles.dropdownItemText, newBatch.productName === option && styles.dropdownItemTextActive]}>{option}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  )}
                   <Label text="Количество" />
                   <TextInput style={styles.input} keyboardType="numeric" value={newBatch.quantity} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, quantity: value }))} />
                   <Label text="Дата изготовления" />
@@ -1738,12 +1740,37 @@ export default function App() {
 
           {screen === 'inspection' && (
             <View>
-              <View style={styles.rowBetween}>
-                <Pressable style={styles.smallCloseButton} onPress={() => { setSelectedBatchId(null); setScreen('batches'); setIsControlEditMode(false); }}>
+              <View style={styles.inspectionHeader}>
+                <SectionTitle title="Контроль" />
+                <Pressable
+                  style={styles.smallCloseButton}
+                  onPress={() => {
+                    if (!selectedBatch) {
+                      setSelectedBatchId(null);
+                      setIsControlEditMode(false);
+                      return;
+                    }
+                    Alert.alert('Отменить процесс?', '', [
+                      { text: 'Нет', style: 'cancel' },
+                      {
+                        text: 'Да',
+                        style: 'destructive',
+                        onPress: async () => {
+                          if (canCancelAcceptedBatch) {
+                            await cancelAcceptedBatch(selectedBatch);
+                            setSelectedBatchId(null);
+                            setIsControlEditMode(false);
+                            return;
+                          }
+                          setSelectedBatchId(null);
+                          setIsControlEditMode(false);
+                        },
+                      },
+                    ]);
+                  }}
+                >
                   <Text style={styles.smallCloseButtonText}>×</Text>
                 </Pressable>
-                <SectionTitle title="Контроль" />
-                <View style={{ width: 44 }} />
               </View>
               {currentUser.role === 'Контролер' && !currentUserOnControlShift && (
                 <View style={[styles.card, styles.warningCard]}>
@@ -1762,11 +1789,6 @@ export default function App() {
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
                   </View>
 
-                  {canCancelAcceptedBatch && (
-                    <Pressable style={styles.secondaryButton} onPress={() => cancelAcceptedBatch(selectedBatch)}>
-                      <Text style={styles.secondaryButtonText}>Отменить контроль</Text>
-                    </Pressable>
-                  )}
 
                   {selectedBatch.status === 'Проверена' && selectedInspection && selectedInspection.inspectorId !== currentUser.id && (
                     <View style={[styles.card, styles.warningCard]}>
@@ -1858,8 +1880,6 @@ export default function App() {
                     <TextInput style={styles.textarea} multiline value={inspectionForm.geometryConclusion} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, geometryConclusion: value }))} editable={!inspectionLocked} />
                     <Label text="Годных изделий" />
                     <TextInput style={styles.input} keyboardType="numeric" value={inspectionForm.acceptedCount} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, acceptedCount: value }))} editable={!inspectionLocked} />
-                    <Label text="Общий комментарий по партии" />
-                    <TextInput style={styles.textarea} multiline value={inspectionForm.comment} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, comment: value }))} editable={!inspectionLocked} />
                     {!inspectionLocked && (
                       <Pressable style={styles.primaryButton} onPress={saveInspection}><Text style={styles.primaryButtonText}>{selectedInspection ? 'Сохранить изменения' : 'Сохранить контроль'}</Text></Pressable>
                     )}
@@ -1913,7 +1933,7 @@ export default function App() {
                       const isExpanded = defectExpandedBatchId === batch.id;
                       return (
                         <Pressable key={batch.id} style={styles.historyItem} onPress={() => setDefectExpandedBatchId((prev) => (prev === batch.id ? null : batch.id))}>
-                          <Text style={[styles.text, styles.linkText]}>{batch.productName}</Text>
+                          <Text style={styles.defectItemTitle}>{batch.productName}</Text>
                           <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection?.date)}</Text>
                           {!!firstDefect?.imageUri && <Image source={{ uri: firstDefect.imageUri }} style={styles.imagePreviewSmall} />}
                           {isExpanded && inspection && (
@@ -1925,12 +1945,10 @@ export default function App() {
                               <Text style={styles.text}>Работник: {batch.workerName}</Text>
                               <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
                               <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
-                              <Text style={styles.text}>Комментарий: {inspection.comment || '—'}</Text>
-                              {inspection.defects.map((defect) => (
+                                                {inspection.defects.map((defect) => (
                                 <View key={defect.id} style={styles.historyItem}>
                                   <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
                                   <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
-                                  {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
                                 </View>
                               ))}
                             </View>
@@ -2123,7 +2141,7 @@ const styles = StyleSheet.create({
   secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
   iconButton: { width: 56, height: 56, backgroundColor: COLORS.soft, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   iconButtonText: { color: COLORS.text, fontSize: 24, fontWeight: '800' },
-  smallCloseButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  smallCloseButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   smallCloseButtonText: { color: COLORS.text, fontSize: 28, fontWeight: '700', lineHeight: 28 },
   dangerButton: { backgroundColor: '#7f1d1d', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   dangerButtonText: { color: '#fee2e2', fontWeight: '700' },
@@ -2133,6 +2151,7 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 28, fontWeight: '800', color: COLORS.accent2 },
   statTitle: { marginTop: 6, color: COLORS.muted, fontSize: 13 },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  inspectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   badge: { borderRadius: 999, paddingVertical: 6, paddingHorizontal: 10, marginLeft: 8 },
   badgeText: { color: 'white', fontSize: 12, fontWeight: '700' },
   actionsWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12 },
@@ -2159,5 +2178,11 @@ const styles = StyleSheet.create({
   warningCard: { borderColor: '#f59e0b', backgroundColor: '#451a03' },
   warningText: { color: '#fde68a', fontWeight: '600', lineHeight: 20 },
   linkText: { textDecorationLine: 'underline', color: COLORS.accent2 },
+  dropdownMenu: { backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, marginBottom: 8, overflow: 'hidden' },
+  dropdownItem: { paddingHorizontal: 14, paddingVertical: 12, borderTopWidth: 1, borderTopColor: COLORS.border },
+  dropdownItemActive: { backgroundColor: '#1e3a8a' },
+  dropdownItemText: { color: COLORS.text, fontSize: 15, fontWeight: '600' },
+  dropdownItemTextActive: { color: '#dbeafe' },
+  defectItemTitle: { color: COLORS.accent2, fontSize: 18, fontWeight: '700', textDecorationLine: 'underline', marginBottom: 4 },
 });
 
