@@ -130,6 +130,57 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
+
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const userId = toInt(req.params.id);
+    const { full_name, login, password, role, editor_role } = req.body;
+    if (editor_role !== 'Администратор') {
+      return res.status(403).json({ ok: false, message: 'Только администратор может редактировать пользователей' });
+    }
+    if (!full_name || !login || !role) {
+      return res.status(400).json({ ok: false, message: 'Заполните имя, логин и роль' });
+    }
+    const fields = [full_name.trim(), login.trim(), role, userId];
+    let query = `UPDATE users SET full_name = $1, login = $2, role = $3`;
+    if (password && String(password).trim()) {
+      query += `, password_hash = $5`;
+      fields.push(String(password).trim());
+      query += ` WHERE id = $4 RETURNING *`;
+      const reordered = [fields[0], fields[1], fields[2], fields[3], fields[4]];
+      const result = await pool.query(query, reordered);
+      return res.json(result.rows[0]);
+    }
+    query += ` WHERE id = $4 RETURNING *`;
+    const result = await pool.query(query, fields);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('UPDATE USER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить пользователя' });
+  }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    const userId = toInt(req.params.id);
+    const { editor_role } = req.body;
+    if (editor_role !== 'Администратор') {
+      return res.status(403).json({ ok: false, message: 'Только администратор может удалять пользователей' });
+    }
+    const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+    const user = userResult.rows[0];
+    if (!user) return res.status(404).json({ ok: false, message: 'Пользователь не найден' });
+    if (user.role === 'admin' || user.role === 'Администратор') {
+      return res.status(400).json({ ok: false, message: 'Нельзя удалить учетную запись администратора' });
+    }
+    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('DELETE USER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось удалить пользователя' });
+  }
+});
+
 app.get('/api/workers', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM workers ORDER BY full_name');
@@ -157,6 +208,41 @@ app.post('/api/workers', async (req, res) => {
   } catch (error) {
     console.error('CREATE WORKER ERROR:', error);
     res.status(500).json({ ok: false, message: 'Не удалось добавить рабочего' });
+  }
+});
+
+
+app.put('/api/workers/:id', async (req, res) => {
+  try {
+    const workerId = toInt(req.params.id);
+    const { full_name, editor_role } = req.body;
+    if (editor_role !== 'Администратор') {
+      return res.status(403).json({ ok: false, message: 'Только администратор может редактировать рабочих' });
+    }
+    if (!full_name) {
+      return res.status(400).json({ ok: false, message: 'full_name обязателен' });
+    }
+    const result = await pool.query('UPDATE workers SET full_name = $1 WHERE id = $2 RETURNING *', [full_name.trim(), workerId]);
+    if (!result.rows[0]) return res.status(404).json({ ok: false, message: 'Рабочий не найден' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('UPDATE WORKER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить рабочего' });
+  }
+});
+
+app.delete('/api/workers/:id', async (req, res) => {
+  try {
+    const workerId = toInt(req.params.id);
+    const { editor_role } = req.body;
+    if (editor_role !== 'Администратор') {
+      return res.status(403).json({ ok: false, message: 'Только администратор может удалять рабочих' });
+    }
+    await pool.query('DELETE FROM workers WHERE id = $1', [workerId]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('DELETE WORKER ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось удалить рабочего' });
   }
 });
 
@@ -439,7 +525,9 @@ app.put('/api/shifts/:id', async (req, res) => {
     const shiftResult = await pool.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
     const shift = shiftResult.rows[0];
     if (!shift) return res.status(404).json({ ok: false, message: 'Смена не найдена' });
-    if (String(shift.assigned_by || '') !== String(editorId || '')) {
+    const editorRole = req.body.editor_role;
+    const isAdmin = editorRole === 'Администратор' || editorRole === 'admin';
+    if (!isAdmin && String(shift.assigned_by || '') !== String(editorId || '')) {
       return res.status(403).json({ ok: false, message: 'Можно редактировать только свои смены' });
     }
     const duplicate = shift.employee_type === 'worker'
@@ -464,7 +552,8 @@ app.delete('/api/shifts/:id', async (req, res) => {
     const shiftResult = await pool.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
     const shift = shiftResult.rows[0];
     if (!shift) return res.status(404).json({ ok: false, message: 'Смена не найдена' });
-    if (String(shift.assigned_by || '') !== String(editorId || '')) {
+    const isAdmin = editorRole === 'Администратор' || editorRole === 'admin';
+    if (!isAdmin && String(shift.assigned_by || '') !== String(editorId || '')) {
       return res.status(403).json({ ok: false, message: 'Можно удалять только свои смены' });
     }
     await pool.query('DELETE FROM shifts WHERE id = $1', [shiftId]);

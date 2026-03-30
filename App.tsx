@@ -431,6 +431,11 @@ export default function App() {
   const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
   const [reportSelectedBatchId, setReportSelectedBatchId] = useState<string | null>(null);
   const [isControlEditMode, setIsControlEditMode] = useState(false);
+  const [adminScheduleType, setAdminScheduleType] = useState<ShiftEmployeeType>('worker');
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [userForm, setUserForm] = useState({ name: '', login: '', password: '', role: 'Контролер' as Role });
+  const [editingWorkerId, setEditingWorkerId] = useState<string | null>(null);
+  const [workerFormName, setWorkerFormName] = useState('');
 
   const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
   const [newWorkerName, setNewWorkerName] = useState('');
@@ -1177,7 +1182,11 @@ export default function App() {
   };
 
   const selectedScheduleEmployeeType: ShiftEmployeeType =
-    currentUser?.role === 'Контрольный мастер' ? 'controller' : 'worker';
+    currentUser?.role === 'Контрольный мастер'
+      ? 'controller'
+      : currentUser?.role === 'Администратор'
+      ? adminScheduleType
+      : 'worker';
 
   const scheduleCandidates = selectedScheduleEmployeeType === 'worker' ? workers : controllers;
 
@@ -1239,6 +1248,7 @@ export default function App() {
     setEditingShiftId(shift.id);
     setShiftDate(shift.date);
     setShiftEmployeeName(shift.employeeName);
+    setAdminScheduleType(shift.employeeType);
     setScreen('schedule');
   };
 
@@ -1297,7 +1307,7 @@ export default function App() {
     const canDeleteAnyBatch = currentUser?.role === 'Администратор';
     const canAcceptBatch =
       mode === 'list' &&
-      (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер' || currentUser?.role === 'Администратор') &&
+      (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер') &&
       batch.status === 'Готова к проверке' &&
       !batch.acceptedByUserId &&
       (currentUser?.role !== 'Контролер' || currentUserOnControlShift);
@@ -1402,7 +1412,7 @@ export default function App() {
           </Pressable>
         )}
 
-        {mode === 'list' && canDeleteAnyBatch && (
+        {canDeleteAnyBatch && (
           <Pressable style={styles.dangerButton} onPress={() => deleteBatch(batch)}>
             <Text style={styles.dangerButtonText}>Удалить запись</Text>
           </Pressable>
@@ -1493,8 +1503,8 @@ export default function App() {
               <Text style={styles.topRole}>{currentUser.role}</Text>
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
-            <Pressable style={styles.secondaryButton} onPress={handleLogout}>
-              <Text style={styles.secondaryButtonText}>Выход</Text>
+            <Pressable style={styles.iconButton} onPress={handleLogout}>
+              <Text style={styles.iconButtonText}>⇦</Text>
             </Pressable>
           </View>
 
@@ -1703,46 +1713,12 @@ export default function App() {
                 </Pressable>
               </View>
 
-              {reportSelectedBatch && (
-                <View style={styles.card}>
-                  <Text style={styles.cardTitle}>Детали партии из отчета</Text>
-                  <Text style={styles.text}>Партия: {reportSelectedBatch.batchNumber}</Text>
-                  <Text style={styles.text}>Изделие: {reportSelectedBatch.productName}</Text>
-                  <Text style={styles.text}>Работник: {reportSelectedBatch.workerName}</Text>
-                  <Text style={styles.text}>Статус: {reportSelectedBatch.status}</Text>
-                  {!!reportSelectedInspection && (
-                    <>
-                      <Text style={styles.text}>Проверил: {reportSelectedInspection.inspector}</Text>
-                      <Text style={styles.text}>Дата контроля: {formatDisplayDate(reportSelectedInspection.date)}</Text>
-                      <Text style={styles.text}>Визуальный контроль: {reportSelectedInspection.visualConclusion || '—'}</Text>
-                      <Text style={styles.text}>Параметры: {reportSelectedInspection.geometryConclusion || '—'}</Text>
-                      <Text style={styles.text}>Годных изделий: {reportSelectedInspection.acceptedCount}</Text>
-                      <Text style={styles.text}>Бракованных изделий: {reportSelectedInspection.rejectedCount}</Text>
-                      <Text style={styles.text}>Комментарий: {reportSelectedInspection.comment || '—'}</Text>
-                      <Text style={styles.cardSubTitle}>Обнаруженные дефекты</Text>
-                      {reportSelectedInspection.defects.length === 0 ? (
-                        <Text style={styles.text}>Дефекты не зафиксированы.</Text>
-                      ) : (
-                        reportSelectedInspection.defects.map((defect) => (
-                          <View key={defect.id} style={styles.historyItem}>
-                            <Text style={styles.text}><Text style={styles.textBold}>{defect.defectClass}</Text> — {defect.affectedCount} шт.</Text>
-                            <Text style={styles.text}>Уверенность AI: {(defect.confidence * 100).toFixed(1)}%</Text>
-                            <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
-                            {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
-                          </View>
-                        ))
-                      )}
-                    </>
-                  )}
-                </View>
-              )}
-
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Готовы к отправке</Text>
                 {readyToSendBatches.length === 0 ? (
                   <Text style={styles.text}>Нет партий, готовых к отправке.</Text>
                 ) : (
-                  readyToSendBatches.map((batch) => renderBatchCard(batch, 'list'))
+                  readyToSendBatches.map((batch) => renderBatchCard(batch, 'report'))
                 )}
               </View>
 
@@ -1772,8 +1748,21 @@ export default function App() {
               <SectionTitle title="Смены" />
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>
-                  {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : 'Отметить выход на смену'}
+                  {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : currentUser.role === 'Администратор' ? 'Управление сменами' : 'Отметить выход на смену'}
                 </Text>
+                {currentUser.role === 'Администратор' && !editingShiftId && (
+                  <>
+                    <Label text="Тип сотрудника" />
+                    <View style={styles.roleRow}>
+                      <Pressable style={[styles.roleButton, adminScheduleType === 'worker' && styles.roleButtonActive]} onPress={() => setAdminScheduleType('worker')}>
+                        <Text style={[styles.roleButtonText, adminScheduleType === 'worker' && styles.roleButtonTextActive]}>Рабочий</Text>
+                      </Pressable>
+                      <Pressable style={[styles.roleButton, adminScheduleType === 'controller' && styles.roleButtonActive]} onPress={() => setAdminScheduleType('controller')}>
+                        <Text style={[styles.roleButtonText, adminScheduleType === 'controller' && styles.roleButtonTextActive]}>Контролер / КМ</Text>
+                      </Pressable>
+                    </View>
+                  </>
+                )}
                 <Label text="Дата" />
                 <Pressable style={styles.datePickerButton} onPress={openShiftDatePicker}>
                   <Text style={styles.datePickerButtonText}>{shiftDate || 'Выбрать дату'}</Text>
@@ -1827,21 +1816,74 @@ export default function App() {
               <SectionTitle title="Панель администратора" />
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Пользователи</Text>
+                {editingUserId && (
+                  <View style={styles.cardSoft}>
+                    <Label text="Имя" />
+                    <TextInput style={styles.input} value={userForm.name} onChangeText={(value) => setUserForm((prev) => ({ ...prev, name: value }))} />
+                    <Label text="Логин" />
+                    <TextInput style={styles.input} value={userForm.login} onChangeText={(value) => setUserForm((prev) => ({ ...prev, login: value }))} />
+                    <Label text="Новый пароль" />
+                    <TextInput style={styles.input} value={userForm.password} onChangeText={(value) => setUserForm((prev) => ({ ...prev, password: value }))} placeholder="Оставьте пустым, чтобы не менять" placeholderTextColor={COLORS.muted} />
+                    <Label text="Роль" />
+                    <View style={styles.roleRow}>
+                      {(['Администратор', 'Производственный мастер', 'Контрольный мастер', 'Контролер'] as Role[]).map((role) => (
+                        <Pressable key={role} style={[styles.roleButton, userForm.role === role && styles.roleButtonActive]} onPress={() => setUserForm((prev) => ({ ...prev, role }))}>
+                          <Text style={[styles.roleButtonText, userForm.role === role && styles.roleButtonTextActive]}>{role}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <Pressable style={styles.primaryButton} onPress={saveUser}>
+                      <Text style={styles.primaryButtonText}>Сохранить пользователя</Text>
+                    </Pressable>
+                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingUserId(null); setUserForm({ name: '', login: '', password: '', role: 'Контролер' }); }}>
+                      <Text style={styles.secondaryButtonText}>Отмена</Text>
+                    </Pressable>
+                  </View>
+                )}
                 {users.map((u) => (
                   <View key={u.id} style={styles.historyItem}>
                     <Text style={styles.text}><Text style={styles.textBold}>{u.name}</Text></Text>
                     <Text style={styles.text}>Логин: {u.login}</Text>
                     <Text style={styles.text}>Роль: {u.role}</Text>
+                    <View style={styles.actionsWrap}>
+                      <Pressable style={styles.secondaryButton} onPress={() => startEditUser(u)}>
+                        <Text style={styles.secondaryButtonText}>Редактировать</Text>
+                      </Pressable>
+                      {u.id !== currentUser.id && (
+                        <Pressable style={styles.dangerButton} onPress={() => deleteUser(u)}>
+                          <Text style={styles.dangerButtonText}>Удалить</Text>
+                        </Pressable>
+                      )}
+                    </View>
                   </View>
                 ))}
               </View>
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Рабочие</Text>
-                <Label text="Новый рабочий" />
-                <TextInput style={styles.input} value={newWorkerName} onChangeText={setNewWorkerName} />
-                <Pressable style={styles.primaryButton} onPress={addWorker}><Text style={styles.primaryButtonText}>Добавить рабочего</Text></Pressable>
+                <View style={styles.cardSoft}>
+                  <Label text={editingWorkerId ? 'Редактирование рабочего' : 'Новый рабочий'} />
+                  <TextInput style={styles.input} value={editingWorkerId ? workerFormName : newWorkerName} onChangeText={editingWorkerId ? setWorkerFormName : setNewWorkerName} />
+                  <Pressable style={styles.primaryButton} onPress={editingWorkerId ? saveWorker : () => addWorker()}>
+                    <Text style={styles.primaryButtonText}>{editingWorkerId ? 'Сохранить рабочего' : 'Добавить рабочего'}</Text>
+                  </Pressable>
+                  {editingWorkerId && (
+                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingWorkerId(null); setWorkerFormName(''); }}>
+                      <Text style={styles.secondaryButtonText}>Отмена</Text>
+                    </Pressable>
+                  )}
+                </View>
                 {workers.map((worker) => (
-                  <View key={worker.id} style={styles.historyItem}><Text style={styles.text}>{worker.name}</Text></View>
+                  <View key={worker.id} style={styles.historyItem}>
+                    <Text style={styles.text}>{worker.name}</Text>
+                    <View style={styles.actionsWrap}>
+                      <Pressable style={styles.secondaryButton} onPress={() => startEditWorker(worker)}>
+                        <Text style={styles.secondaryButtonText}>Редактировать</Text>
+                      </Pressable>
+                      <Pressable style={styles.dangerButton} onPress={() => deleteWorker(worker)}>
+                        <Text style={styles.dangerButtonText}>Удалить</Text>
+                      </Pressable>
+                    </View>
+                  </View>
                 ))}
               </View>
             </View>
@@ -1878,6 +1920,8 @@ const styles = StyleSheet.create({
   primaryButtonText: { color: '#052e16', fontWeight: '800' },
   secondaryButton: { backgroundColor: COLORS.soft, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
+  iconButton: { width: 56, height: 56, backgroundColor: COLORS.soft, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  iconButtonText: { color: COLORS.text, fontSize: 24, fontWeight: '800' },
   dangerButton: { backgroundColor: '#7f1d1d', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   dangerButtonText: { color: '#fee2e2', fontWeight: '700' },
   sectionTitle: { color: COLORS.text, fontSize: 22, fontWeight: '700', marginBottom: 12 },
