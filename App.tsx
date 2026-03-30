@@ -2010,10 +2010,12 @@ export default function App() {
                       const firstDefect = inspection?.defects?.[0];
                       const isExpanded = defectExpandedBatchId === batch.id;
                       return (
-                        <Pressable key={batch.id} style={styles.historyItem} onPress={() => setDefectExpandedBatchId((prev) => (prev === batch.id ? null : batch.id))}>
-                          <Text style={styles.defectItemTitle}>{batch.productName}</Text>
-                          <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection?.date)}</Text>
-                          {!!firstDefect?.imageUri && <Image source={{ uri: firstDefect.imageUri }} style={styles.imagePreviewSmall} />}
+                        <View key={batch.id} style={styles.historyItem}>
+                          <Pressable onPress={() => setDefectExpandedBatchId((prev) => (prev === batch.id ? null : batch.id))}>
+                            <Text style={styles.defectItemTitle}>{batch.productName}</Text>
+                            <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection?.date)}</Text>
+                            {!!firstDefect?.imageUri && <Image source={{ uri: firstDefect.imageUri }} style={styles.imagePreviewSmall} />}
+                          </Pressable>
                           {isExpanded && inspection && (
                             <View style={styles.cardSoft}>
                               <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
@@ -2059,7 +2061,7 @@ export default function App() {
                               ))}
                             </View>
                           )}
-                        </Pressable>
+                        </View>
                       );
                     })}
                   </View>
