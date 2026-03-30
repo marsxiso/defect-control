@@ -23,6 +23,8 @@ async function runSchema() {
   const schemaPath = path.join(__dirname, 'schema.sql');
   const sql = fs.readFileSync(schemaPath, 'utf8');
   await pool.query(sql);
+  await pool.query("ALTER TABLE inspection_defects ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'На рассмотрении'");
+  await pool.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS sent_to_assembly_at TIMESTAMPTZ");
 }
 
 function toInt(value) {
@@ -36,7 +38,7 @@ function mapInspectionRow(row) {
     batch_id: String(row.batch_id),
     inspector_id: String(row.inspector_id),
     inspector_name: row.inspector_name,
-    inspection_date: String(row.inspection_date).slice(0, 10),
+    inspection_date: new Date(row.inspection_date).toISOString().slice(0, 10),
     visual_conclusion: row.visual_conclusion || '',
     geometry_conclusion: row.geometry_conclusion || '',
     accepted_count: Number(row.accepted_count || 0),
@@ -59,7 +61,8 @@ async function getInspectionByBatch(batchId) {
             'confidence', d.confidence,
             'affected_count', d.affected_count,
             'comment', d.comment,
-            'image_uri', d.image_uri
+            'image_uri', d.image_uri,
+            'review_status', COALESCE(d.review_status, 'На рассмотрении')
           )
         ) FILTER (WHERE d.id IS NOT NULL),
         '[]'::json
@@ -499,9 +502,9 @@ app.post('/api/inspections', async (req, res) => {
 
     for (const defect of Array.isArray(defects) ? defects : []) {
       await client.query(
-        `INSERT INTO inspection_defects (inspection_id, defect_class, confidence, affected_count, comment, image_uri)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [inspection.id, defect.defect_class, defect.confidence || 0, defect.affected_count || 0, defect.comment || '', defect.image_uri || null]
+        `INSERT INTO inspection_defects (inspection_id, defect_class, confidence, affected_count, comment, image_uri, review_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [inspection.id, defect.defect_class, defect.confidence || 0, defect.affected_count || 0, defect.comment || '', defect.image_uri || null, defect.review_status || 'На рассмотрении']
       );
     }
 
@@ -564,9 +567,9 @@ app.put('/api/inspections/:id', async (req, res) => {
     await client.query('DELETE FROM inspection_defects WHERE inspection_id = $1', [inspectionId]);
     for (const defect of Array.isArray(defects) ? defects : []) {
       await client.query(
-        `INSERT INTO inspection_defects (inspection_id, defect_class, confidence, affected_count, comment, image_uri)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [inspectionId, defect.defect_class, defect.confidence || 0, defect.affected_count || 0, defect.comment || '', defect.image_uri || null]
+        `INSERT INTO inspection_defects (inspection_id, defect_class, confidence, affected_count, comment, image_uri, review_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [inspectionId, defect.defect_class, defect.confidence || 0, defect.affected_count || 0, defect.comment || '', defect.image_uri || null, defect.review_status || 'На рассмотрении']
       );
     }
     await client.query('COMMIT');
@@ -577,6 +580,25 @@ app.put('/api/inspections/:id', async (req, res) => {
     res.status(500).json({ ok: false, message: 'Не удалось обновить контроль' });
   } finally {
     client.release();
+  }
+});
+
+app.put('/api/inspection-defects/:id/status', async (req, res) => {
+  try {
+    const defectId = toInt(req.params.id);
+    const { review_status } = req.body;
+    if (!defectId || !review_status) {
+      return res.status(400).json({ ok: false, message: 'Нужны id дефекта и статус' });
+    }
+    if (!['Забраковано', 'На рассмотрении', 'Допущено до сборки'].includes(review_status)) {
+      return res.status(400).json({ ok: false, message: 'Некорректный статус' });
+    }
+    const result = await pool.query('UPDATE inspection_defects SET review_status = $1 WHERE id = $2 RETURNING *', [review_status, defectId]);
+    if (!result.rows[0]) return res.status(404).json({ ok: false, message: 'Дефект не найден' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('UPDATE DEFECT STATUS ERROR:', error);
+    res.status(500).json({ ok: false, message: 'Не удалось обновить статус брака' });
   }
 });
 

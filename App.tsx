@@ -12,10 +12,11 @@ import {
 } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор';
-type ShiftRole = 'Рабочий';
-type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Отправлено на сборку';
+type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Готова к отправке' | 'Отправлено на сборку';
 type DefectClass =
   | 'Без дефекта'
   | 'Царапина'
@@ -24,14 +25,24 @@ type DefectClass =
   | 'Вмятина'
   | 'Раковина'
   | 'Неопределено';
+type DefectReviewStatus = 'Забраковано' | 'На рассмотрении' | 'Допущено до сборки';
+
+type Screen = 'dashboard' | 'batches' | 'inspection' | 'report' | 'schedule' | 'admin' | 'defects';
 
 type Batch = {
   id: string;
+  batchNumber: string;
   productName: string;
   quantity: number;
   manufactureDate: string;
   workerName: string;
   status: BatchStatus;
+  createdBy?: string;
+  creatorName?: string;
+  inspectorId?: string;
+  inspectorName?: string;
+  acceptedByUserId?: string;
+  sentToAssemblyAt?: string;
 };
 
 type DefectItem = {
@@ -40,13 +51,14 @@ type DefectItem = {
   confidence: number;
   affectedCount: number;
   comment: string;
-  imageUri?: string;
   reviewStatus: DefectReviewStatus;
+  imageUri?: string;
 };
 
 type Inspection = {
   id: string;
   batchId: string;
+  inspectorId: string;
   inspector: string;
   date: string;
   visualConclusion: string;
@@ -69,13 +81,16 @@ type Worker = {
   name: string;
 };
 
+type ShiftEmployeeType = 'worker' | 'controller';
+
 type Shift = {
   id: string;
   date: string;
   employeeName: string;
-  role: ShiftRole;
-  batchId?: string;
-  batchNumber?: string;
+  employeeType: ShiftEmployeeType;
+  assigneeId: string;
+  assignedBy?: string;
+  roleLabel?: string;
 };
 
 type RoboflowPrediction = {
@@ -121,16 +136,50 @@ type ApiBatchRow = {
   quantity: number;
   status: string;
   created_at?: string;
+  created_by?: number | string | null;
+  creator_name?: string | null;
   assigned_worker_id?: number | string | null;
   full_name?: string | null;
+  inspector_id?: number | string | null;
+  inspector_name?: string | null;
+  accepted_by_user_id?: number | string | null;
+  sent_to_assembly_at?: string | null;
 };
 
 type ApiShiftRow = {
   id: number | string;
-  worker_id: number | string;
+  worker_id?: number | string | null;
+  user_id?: number | string | null;
   shift_date: string;
   shift_type: string;
   full_name: string;
+  employee_type: ShiftEmployeeType;
+  assigned_by?: number | string | null;
+  role_label?: string | null;
+};
+
+type ApiInspectionDefectRow = {
+  id?: number | string;
+  defect_class: string;
+  confidence: number;
+  affected_count: number;
+  comment?: string;
+  review_status?: string | null;
+  image_uri?: string | null;
+};
+
+type ApiInspectionRow = {
+  id: number | string;
+  batch_id: number | string;
+  inspector_id: number | string;
+  inspector_name: string;
+  inspection_date: string;
+  visual_conclusion: string;
+  geometry_conclusion: string;
+  accepted_count: number;
+  rejected_count: number;
+  comment: string;
+  defects: ApiInspectionDefectRow[];
 };
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://defect-control.onrender.com';
@@ -144,6 +193,8 @@ const COLORS = {
   text: '#e2e8f0',
   muted: '#94a3b8',
   border: '#334155',
+  warning: '#f59e0b',
+  danger: '#ef4444',
 };
 
 const monthNames: Record<string, string> = {
@@ -160,6 +211,11 @@ const monthNames: Record<string, string> = {
   '11': 'Ноябрь',
   '12': 'Декабрь',
 };
+
+const PRODUCT_OPTIONS = ['Втулка', 'Переходник', 'Удлинитель', 'Корпус'] as const;
+const DEFECT_STATUS_OPTIONS: DefectReviewStatus[] = ['Забраковано', 'На рассмотрении', 'Допущено до сборки'];
+type ProductOption = (typeof PRODUCT_OPTIONS)[number];
+
 
 function mapApiRoleToAppRole(role: string): Role {
   const roleMap: Record<string, Role> = {
@@ -206,9 +262,7 @@ function makeAiSummary(rawLabel: string | undefined, defect: DefectClass, confid
   return `Обнаружен дефект "${defect}" с вероятностью ${percent}%`;
 }
 
-async function analyzeDefectViaApi(
-  imageUri: string,
-): Promise<{ defect: DefectClass; confidence: number; summary?: string }> {
+async function analyzeDefectViaApi(imageUri: string): Promise<{ defect: DefectClass; confidence: number; summary?: string }> {
   const formData = new FormData();
   formData.append(
     'file',
@@ -246,11 +300,7 @@ async function analyzeDefectViaApi(
 
     const predictions = Array.isArray(data.predictions) ? data.predictions : [];
     if (predictions.length === 0) {
-      return {
-        defect: 'Без дефекта',
-        confidence: 0,
-        summary: 'Дефекты на изображении не обнаружены',
-      };
+      return { defect: 'Без дефекта', confidence: 0, summary: 'Дефекты на изображении не обнаружены' };
     }
 
     const bestPrediction = predictions.reduce((best, current) =>
@@ -278,6 +328,36 @@ function todayStr() {
   return formatDate(new Date());
 }
 
+function formatDisplayDate(value?: string) {
+  if (!value) return '—';
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    const [, y, m, d] = match;
+    return `${d}.${m}.${y.slice(-2)}`;
+  }
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    const d = String(parsed.getDate()).padStart(2, '0');
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const y = String(parsed.getFullYear()).slice(-2);
+    return `${d}.${m}.${y}`;
+  }
+  return String(value);
+}
+
+function normalizeDefectReviewStatus(value?: string): DefectReviewStatus {
+  if (value === 'Забраковано' || value === 'Допущено до сборки') return value;
+  return 'На рассмотрении';
+}
+
+function getArchiveDate(batch: Batch) {
+  return batch.sentToAssemblyAt || batch.manufactureDate;
+}
+
+function formatMonthFolderLabel(date: string) {
+  return monthFolderName(date);
+}
+
 function uid(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
@@ -298,11 +378,6 @@ function isDateInRange(value: string, from: string, to: string) {
 function monthFolderName(date: string) {
   const [year, month] = date.split('-');
   return `${monthNames[month] || month} ${year}`;
-}
-
-function normalizeReviewStatus(value?: string): DefectReviewStatus {
-  if (value === 'Забраковано' || value === 'Допущено до сборки') return value;
-  return 'На рассмотрении';
 }
 
 function isCurrentMonth(date: string) {
@@ -340,8 +415,13 @@ function StatCard({ title, value }: { title: string; value: string }) {
 
 function StatusBadge({ status }: { status: BatchStatus }) {
   const backgroundColor =
-    status === 'Готова к проверке' ? '#2563eb' : status === 'Проверена' ? '#15803d' : '#6b7280';
-
+    status === 'Готова к проверке'
+      ? '#2563eb'
+      : status === 'Проверена'
+      ? '#15803d'
+      : status === 'Готова к отправке'
+      ? '#f59e0b'
+      : '#6b7280';
   return (
     <View style={[styles.badge, { backgroundColor }]}>
       <Text style={styles.badgeText}>{status}</Text>
@@ -349,15 +429,7 @@ function StatusBadge({ status }: { status: BatchStatus }) {
   );
 }
 
-function TabButton({
-  title,
-  active,
-  onPress,
-}: {
-  title: string;
-  active: boolean;
-  onPress: () => void;
-}) {
+function TabButton({ title, active, onPress }: { title: string; active: boolean; onPress: () => void }) {
   return (
     <Pressable style={[styles.tabButton, active && styles.tabButtonActive]} onPress={onPress}>
       <Text style={styles.tabButtonText}>{title}</Text>
@@ -377,33 +449,31 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [, setToken] = useState('');
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [screen, setScreen] = useState<'dashboard' | 'batches' | 'inspection' | 'report' | 'schedule' | 'admin'>('dashboard');
+  const [screen, setScreen] = useState<Screen>('dashboard');
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
+  const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
+  const [reportSelectedBatchId, setReportSelectedBatchId] = useState<string | null>(null);
+  const [isControlEditMode, setIsControlEditMode] = useState(false);
+  const [adminScheduleType, setAdminScheduleType] = useState<ShiftEmployeeType>('worker');
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [userForm, setUserForm] = useState({ name: '', login: '', password: '', role: 'Контролер' as Role });
+  const [editingWorkerId, setEditingWorkerId] = useState<string | null>(null);
+  const [workerFormName, setWorkerFormName] = useState('');
 
-  const [newBatch, setNewBatch] = useState({
-    productName: '',
-    quantity: '1',
-    manufactureDate: todayStr(),
-    workerName: '',
-  });
-
+  const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
+  const [showProductMenu, setShowProductMenu] = useState(false);
   const [newWorkerName, setNewWorkerName] = useState('');
   const [inspectionForm, setInspectionForm] = useState({
     visualConclusion: '',
     geometryConclusion: '',
     acceptedCount: '0',
     rejectedCount: '0',
-    comment: '',
     imageUri: '',
   });
   const [detectedDefects, setDetectedDefects] = useState<DefectItem[]>([]);
   const [defectComment, setDefectComment] = useState('');
-  const [inferenceState, setInferenceState] = useState<{
-    loading: boolean;
-    defect: DefectClass;
-    confidence: number;
-    summary?: string;
-  }>({
+  const [inferenceState, setInferenceState] = useState<{ loading: boolean; defect: DefectClass; confidence: number; summary?: string }>({
     loading: false,
     defect: 'Неопределено',
     confidence: 0,
@@ -417,62 +487,302 @@ export default function App() {
 
   const [shiftDate, setShiftDate] = useState(todayStr());
   const [shiftEmployeeName, setShiftEmployeeName] = useState('');
+  const [showShiftDatePicker, setShowShiftDatePicker] = useState(false);
 
+  const [defectExpandedBatchId, setDefectExpandedBatchId] = useState<string | null>(null);
   const [reportDateFrom, setReportDateFrom] = useState('');
   const [reportDateTo, setReportDateTo] = useState('');
+  const [reportDefectStatus, setReportDefectStatus] = useState<'Все' | DefectReviewStatus>('Все');
+  const [expandedArchiveMonths, setExpandedArchiveMonths] = useState<string[]>([]);
+  const [showReportFromPicker, setShowReportFromPicker] = useState(false);
+  const [showReportToPicker, setShowReportToPicker] = useState(false);
+
+  const controllers = useMemo(
+    () => users.filter((user) => user.role === 'Контролер' || user.role === 'Контрольный мастер'),
+    [users],
+  );
+
+  const selectedBatch = useMemo(
+    () => batches.find((b) => b.id === selectedBatchId) || null,
+    [batches, selectedBatchId],
+  );
+
+  const selectedInspection = useMemo(
+    () => inspections.find((item) => item.batchId === selectedBatchId) || null,
+    [inspections, selectedBatchId],
+  );
+
+  const selectedBatchAcceptedByCurrentUser = useMemo(() => {
+    if (!currentUser || !selectedBatch) return false;
+    if (!selectedBatch.acceptedByUserId) return false;
+    return selectedBatch.acceptedByUserId === currentUser.id;
+  }, [currentUser, selectedBatch]);
+
+  const acceptedBatchForCurrentUser = useMemo(
+    () =>
+      currentUser
+        ? batches.find(
+            (b) =>
+              b.acceptedByUserId === currentUser.id &&
+              b.status !== 'Готова к отправке' &&
+              b.status !== 'Отправлено на сборку',
+          ) || null
+        : null,
+    [batches, currentUser],
+  );
+
+  const canCancelAcceptedBatch = useMemo(
+    () =>
+      !!(
+        currentUser &&
+        selectedBatch &&
+        selectedBatch.acceptedByUserId === currentUser.id &&
+        !selectedInspection &&
+        selectedBatch.status === 'Готова к проверке'
+      ),
+    [currentUser, selectedBatch, selectedInspection],
+  );
+
+  const canEditInspectionByCurrentUser = useMemo(
+    () =>
+      !!(
+        currentUser &&
+        selectedInspection &&
+        selectedInspection.inspectorId === currentUser.id &&
+        selectedBatch &&
+        selectedBatch.status !== 'Готова к отправке' &&
+        selectedBatch.status !== 'Отправлено на сборку'
+      ),
+    [currentUser, selectedInspection, selectedBatch],
+  );
+
+  const reportSelectedBatch = useMemo(
+    () => batches.find((b) => b.id === reportSelectedBatchId) || null,
+    [batches, reportSelectedBatchId],
+  );
+
+  const reportSelectedInspection = useMemo(
+    () => inspections.find((item) => item.batchId === reportSelectedBatchId) || null,
+    [inspections, reportSelectedBatchId],
+  );
+
+  const currentMonthBatches = useMemo(() => batches.filter((b) => isCurrentMonth(b.manufactureDate)), [batches]);
+
+  const stats = useMemo(
+    () => ({
+      total: currentMonthBatches.length,
+      readyCheck: currentMonthBatches.filter((b) => b.status === 'Готова к проверке').length,
+      checked: currentMonthBatches.filter((b) => b.status === 'Проверена').length,
+      readyToSend: currentMonthBatches.filter((b) => b.status === 'Готова к отправке').length,
+    }),
+    [currentMonthBatches],
+  );
+
+  const visibleBatchesPage = useMemo(
+    () => [...batches].filter((b) => b.status !== 'Отправлено на сборку').sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
+    [batches],
+  );
+
+  const batchMatchesReportFilters = (batch: Batch) => {
+    const archiveDate = getArchiveDate(batch);
+    if (!isDateInRange(archiveDate, reportDateFrom, reportDateTo)) return false;
+    if (reportDefectStatus === 'Все') return true;
+    const inspection = inspections.find((item) => item.batchId === batch.id);
+    return !!inspection?.defects?.some((defect) => defect.reviewStatus === reportDefectStatus);
+  };
+
+  const readyToSendBatches = useMemo(
+    () => batches
+      .filter((b) => b.status === 'Готова к отправке')
+      .filter(batchMatchesReportFilters)
+      .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
+    [batches, reportDateFrom, reportDateTo, reportDefectStatus, inspections],
+  );
+
+  const reportBatches = useMemo(
+    () => batches
+      .filter((b) => b.status === 'Отправлено на сборку')
+      .filter(batchMatchesReportFilters)
+      .sort((a, b) => dateToMs(getArchiveDate(b)) - dateToMs(getArchiveDate(a))),
+    [batches, reportDateFrom, reportDateTo, reportDefectStatus, inspections],
+  );
+
+  const folderedArchive = useMemo(() => {
+    const grouped: Record<string, Batch[]> = {};
+    reportBatches.forEach((b) => {
+      const folder = formatMonthFolderLabel(getArchiveDate(b));
+      if (!grouped[folder]) grouped[folder] = [];
+      grouped[folder].push(b);
+    });
+    return grouped;
+  }, [reportBatches]);
+
+
+
+  const defectBatchesByProduct = useMemo(() => {
+    const grouped: Record<string, Batch[]> = {};
+    batches
+      .filter((batch) => {
+        const inspection = inspections.find((item) => item.batchId === batch.id);
+        return !!inspection && inspection.defects.length > 0;
+      })
+      .forEach((batch) => {
+        if (!grouped[batch.productName]) grouped[batch.productName] = [];
+        grouped[batch.productName].push(batch);
+      });
+    return grouped;
+  }, [batches, inspections]);
+
+  const filteredBatchesForCurrentUser = useMemo(() => {
+    if (!currentUser) return visibleBatchesPage;
+    if (currentUser.role === 'Контролер' || currentUser.role === 'Контрольный мастер') {
+      return visibleBatchesPage.filter(
+        (b) => !b.acceptedByUserId || b.acceptedByUserId === currentUser.id,
+      );
+    }
+    return visibleBatchesPage;
+  }, [visibleBatchesPage, currentUser]);
+
+  const visibleShifts = useMemo(
+    () => shifts
+      .filter((s) => !shiftDate || String(s.date).slice(0, 10) === shiftDate)
+      .sort((a, b) => `${a.date}-${a.employeeName}`.localeCompare(`${b.date}-${b.employeeName}`)),
+    [shifts, shiftDate],
+  );
+
+  const workersOnSelectedManufactureDate = useMemo(() => {
+    const activeShiftWorkers = shifts
+      .filter((shift) => shift.employeeType === 'worker' && String(shift.date).slice(0, 10) === newBatch.manufactureDate)
+      .map((shift) => shift.employeeName);
+    return workers.filter((worker) => activeShiftWorkers.includes(worker.name));
+  }, [workers, shifts, newBatch.manufactureDate]);
+
+  const controllersOnShiftToday = useMemo(
+    () => shifts.filter((shift) => shift.employeeType === 'controller' && shift.date === todayStr()).map((shift) => shift.assigneeId),
+    [shifts],
+  );
+
+  const currentUserOnControlShift = useMemo(() => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') return true;
+    if (currentUser.role !== 'Контролер') return false;
+    return controllersOnShiftToday.includes(currentUser.id);
+  }, [controllersOnShiftToday, currentUser]);
+
+  const batchCanBeEditedByCurrentUser = useMemo(() => {
+    if (!currentUser || !selectedBatch) return false;
+    if (selectedBatch.status === 'Отправлено на сборку') return false;
+    if (!selectedInspection) return false;
+    return selectedInspection.inspectorId === currentUser.id;
+  }, [currentUser, selectedBatch, selectedInspection]);
+
+  const inspectionLocked = useMemo(() => {
+    if (!selectedBatch) return true;
+    if (selectedBatch.status === 'Готова к отправке' || selectedBatch.status === 'Отправлено на сборку') return true;
+    if (!selectedInspection) return false;
+    if (!canEditInspectionByCurrentUser) return true;
+    return !isControlEditMode;
+  }, [selectedBatch, selectedInspection, canEditInspectionByCurrentUser, isControlEditMode]);
+
+  const onChangeShiftDate = (event: DateTimePickerEvent, selectedDate?: Date) => {
+    setShowShiftDatePicker(false);
+    if (event.type === 'dismissed' || !selectedDate) return;
+    setShiftDate(formatDate(selectedDate));
+  };
+
+  const openShiftDatePicker = () => setShowShiftDatePicker(true);
+
+  const onChangeReportFromDate = (event: DateTimePickerEvent, selectedDate?: Date) => {
+    setShowReportFromPicker(false);
+    if (event.type === 'dismissed' || !selectedDate) return;
+    setReportDateFrom(formatDate(selectedDate));
+  };
+
+  const onChangeReportToDate = (event: DateTimePickerEvent, selectedDate?: Date) => {
+    setShowReportToPicker(false);
+    if (event.type === 'dismissed' || !selectedDate) return;
+    setReportDateTo(formatDate(selectedDate));
+  };
 
   const syncAllFromServer = async () => {
-    const [usersRes, workersRes, batchesRes, shiftsRes] = await Promise.all([
+    const [usersRes, workersRes, batchesRes, shiftsRes, inspectionsRes] = await Promise.all([
       fetch(`${API_URL}/api/users`),
       fetch(`${API_URL}/api/workers`),
       fetch(`${API_URL}/api/batches`),
       fetch(`${API_URL}/api/shifts`),
+      fetch(`${API_URL}/api/inspections`),
     ]);
 
-    const [usersData, workersData, batchesData, shiftsData] = await Promise.all([
+    const [usersData, workersData, batchesData, shiftsData, inspectionsData] = await Promise.all([
       readJson(usersRes),
       readJson(workersRes),
       readJson(batchesRes),
       readJson(shiftsRes),
+      readJson(inspectionsRes),
     ]);
 
     if (!usersRes.ok || !Array.isArray(usersData)) throw new Error('Не удалось получить пользователей');
     if (!workersRes.ok || !Array.isArray(workersData)) throw new Error('Не удалось получить рабочих');
     if (!batchesRes.ok || !Array.isArray(batchesData)) throw new Error('Не удалось получить партии');
     if (!shiftsRes.ok || !Array.isArray(shiftsData)) throw new Error('Не удалось получить смены');
+    if (!inspectionsRes.ok || !Array.isArray(inspectionsData)) throw new Error('Не удалось получить результаты контроля');
 
-    const nextUsers: User[] = (usersData as ApiUserRow[]).map((item) => ({
+    setUsers((usersData as ApiUserRow[]).map((item) => ({
       id: String(item.id),
       login: item.login,
       name: item.full_name,
       role: mapApiRoleToAppRole(item.role),
-    }));
+    })));
 
-    const nextWorkers: Worker[] = (workersData as ApiWorkerRow[]).map((item) => ({
+    setWorkers((workersData as ApiWorkerRow[]).map((item) => ({ id: String(item.id), name: item.full_name })));
+
+    setBatches((batchesData as ApiBatchRow[]).map((item) => ({
       id: String(item.id),
-      name: item.full_name,
-    }));
+      batchNumber: item.batch_number,
+      productName: item.product_name,
+      quantity: Number(item.quantity || 0),
+      manufactureDate: String(item.created_at || todayStr()).slice(0, 10),
+      workerName: item.full_name || '',
+      status: (item.status as BatchStatus) || 'Готова к проверке',
+      createdBy: item.created_by != null ? String(item.created_by) : undefined,
+      creatorName: item.creator_name || undefined,
+      inspectorId: item.inspector_id != null ? String(item.inspector_id) : undefined,
+      inspectorName: item.inspector_name || undefined,
+      acceptedByUserId: item.accepted_by_user_id != null ? String(item.accepted_by_user_id) : undefined,
+      sentToAssemblyAt: item.sent_to_assembly_at ? String(item.sent_to_assembly_at).slice(0, 10) : undefined,
+    })));
 
-    const nextShifts: Shift[] = (shiftsData as ApiShiftRow[]).map((item) => ({
+    setShifts((shiftsData as ApiShiftRow[]).map((item) => ({
       id: String(item.id),
       date: String(item.shift_date).slice(0, 10),
       employeeName: item.full_name,
-      role: 'Рабочий',
-    }));
+      employeeType: item.employee_type,
+      assigneeId: item.employee_type === 'worker' ? String(item.worker_id) : String(item.user_id),
+      assignedBy: item.assigned_by != null ? String(item.assigned_by) : undefined,
+      roleLabel: item.role_label || (item.employee_type === 'worker' ? 'Рабочий' : 'Контролер'),
+    })));
 
-    const nextBatches: Batch[] = (batchesData as ApiBatchRow[]).map((item) => ({
+    setInspections((inspectionsData as ApiInspectionRow[]).map((item) => ({
       id: String(item.id),
-      productName: item.product_name,
-      quantity: Number(item.quantity || 0),
-      manufactureDate: (item.created_at || todayStr()).slice(0, 10),
-      workerName: item.full_name || '',
-      status: (item.status as BatchStatus) || 'Готова к проверке',
-    }));
-
-    setUsers(nextUsers);
-    setWorkers(nextWorkers);
-    setBatches(nextBatches);
-    setShifts(nextShifts);
+      batchId: String(item.batch_id),
+      inspectorId: String(item.inspector_id),
+      inspector: item.inspector_name,
+      date: String(item.inspection_date).slice(0, 10),
+      visualConclusion: item.visual_conclusion || '',
+      geometryConclusion: item.geometry_conclusion || '',
+      defects: (item.defects || []).map((defect) => ({
+        id: defect.id != null ? String(defect.id) : uid('D'),
+        defectClass: normalizeDefectLabel(defect.defect_class),
+        confidence: Number(defect.confidence || 0),
+        affectedCount: Number(defect.affected_count || 0),
+        comment: defect.comment || '',
+        reviewStatus: normalizeDefectReviewStatus(defect.review_status),
+        imageUri: defect.image_uri || undefined,
+      })),
+      acceptedCount: Number(item.accepted_count || 0),
+      rejectedCount: Number(item.rejected_count || 0),
+      comment: item.comment || '',
+    })));
   };
 
   useEffect(() => {
@@ -489,124 +799,63 @@ export default function App() {
         }
       }
     })();
-
     return () => {
       mounted = false;
     };
   }, []);
 
-  const activeBatch = useMemo(
-    () => batches.find((b) => b.id === selectedBatchId) || null,
-    [batches, selectedBatchId],
-  );
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('lizun_current_user');
+        if (raw) {
+          const user = JSON.parse(raw) as User;
+          setCurrentUser(user);
+        }
+      } catch {}
+    })();
+  }, []);
 
-  const currentMonthBatches = useMemo(
-    () => batches.filter((b) => isCurrentMonth(b.manufactureDate)),
-    [batches],
-  );
+  useEffect(() => {
+    (async () => {
+      try {
+        if (currentUser) {
+          await AsyncStorage.setItem('lizun_current_user', JSON.stringify(currentUser));
+        } else {
+          await AsyncStorage.removeItem('lizun_current_user');
+        }
+      } catch {}
+    })();
+  }, [currentUser]);
 
-  const stats = useMemo(
-    () => ({
-      total: currentMonthBatches.length,
-      readyCheck: currentMonthBatches.filter((b) => b.status === 'Готова к проверке').length,
-      checked: currentMonthBatches.filter((b) => b.status === 'Проверена').length,
-      sentToAssembly: currentMonthBatches.filter((b) => b.status === 'Отправлено на сборку').length,
-    }),
-    [currentMonthBatches],
-  );
-
-  const batchInspections = useMemo(
-    () => (selectedBatchId ? inspections.filter((i) => i.batchId === selectedBatchId) : []),
-    [inspections, selectedBatchId],
-  );
-
-  const visibleBatchesPage = useMemo(
-    () =>
-      [...batches]
-        .filter((b) => b.status === 'Готова к проверке' || b.status === 'Проверена')
-        .sort((a, b) =>
-          a.status === b.status
-            ? dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)
-            : a.status === 'Готова к проверке'
-              ? -1
-              : 1,
-        ),
-    [batches],
-  );
-
-  const reportBatches = useMemo(
-    () =>
-      batches
-        .filter((b) => b.status === 'Отправлено на сборку')
-        .filter((b) => isDateInRange(b.manufactureDate, reportDateFrom, reportDateTo))
-        .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
-    [batches, reportDateFrom, reportDateTo],
-  );
-
-  const recentArchive = useMemo(() => {
-    const monthAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    return reportBatches.filter((b) => dateToMs(b.manufactureDate) >= monthAgoMs);
-  }, [reportBatches]);
-
-  const folderedArchive = useMemo(() => {
-    const monthAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    const older = reportBatches.filter((b) => dateToMs(b.manufactureDate) < monthAgoMs);
-    const grouped: Record<string, Batch[]> = {};
-    older.forEach((b) => {
-      const folder = monthFolderName(b.manufactureDate);
-      if (!grouped[folder]) grouped[folder] = [];
-      grouped[folder].push(b);
+  useEffect(() => {
+    if (!selectedBatchId) return;
+    const inspection = inspections.find((item) => item.batchId === selectedBatchId);
+    if (!inspection) {
+      setInspectionForm({ visualConclusion: '', geometryConclusion: '', acceptedCount: '0', rejectedCount: '0', imageUri: '' });
+      setDetectedDefects([]);
+      return;
+    }
+    setInspectionForm({
+      visualConclusion: inspection.visualConclusion,
+      geometryConclusion: inspection.geometryConclusion,
+      acceptedCount: String(inspection.acceptedCount),
+      rejectedCount: '0',
+      imageUri: '',
     });
-    return grouped;
-  }, [reportBatches]);
+    setDetectedDefects(inspection.defects);
+    setDefectComment('');
+    setInferenceState({ loading: false, defect: 'Неопределено', confidence: 0, summary: '' });
+    setIsControlEditMode(false);
+  }, [selectedBatchId, inspections]);
 
-  const batchMatchesReportStatus = (batch: Batch) => {
-    if (reportStatusFilter === 'Все') return true;
-    const inspection = inspections.find((item) => item.batchId === batch.id);
-    if (!inspection) return false;
-    return inspection.defects.some((defect) => defect.reviewStatus === reportStatusFilter);
-  };
 
-  const batchMatchesReportDates = (batch: Batch) => {
-    const compareDate = batch.sentToAssemblyAt || batch.manufactureDate;
-    if (!reportDateFrom && !reportDateTo) return true;
-    return isDateInRange(compareDate, reportDateFrom, reportDateTo);
-  };
-
-  const filteredReadyToSendBatches = useMemo(
-    () => readyToSendBatches.filter((batch) => batchMatchesReportDates(batch) && batchMatchesReportStatus(batch)),
-    [readyToSendBatches, reportDateFrom, reportDateTo, reportStatusFilter, inspections],
-  );
-
-  const filteredReportBatches = useMemo(
-    () => reportBatches.filter((batch) => batchMatchesReportDates(batch) && batchMatchesReportStatus(batch)),
-    [reportBatches, reportDateFrom, reportDateTo, reportStatusFilter, inspections],
-  );
-
-  const filteredFolderedArchive = useMemo(() => {
-    const grouped: Record<string, Batch[]> = {};
-    filteredReportBatches.forEach((b) => {
-      const folder = formatMonthFolderLabel(getArchiveDate(b));
-      if (!grouped[folder]) grouped[folder] = [];
-      grouped[folder].push(b);
-    });
-    return grouped;
-  }, [filteredReportBatches]);
-
-  const visibleShifts = useMemo(
-    () =>
-      shifts
-        .filter((s) => !shiftDate || String(s.date).slice(0, 10) === shiftDate)
-        .sort((a, b) => `${a.date}-${a.employeeName}`.localeCompare(`${b.date}-${b.employeeName}`)),
-    [shifts, shiftDate],
-  );
-
-  const workersOnSelectedManufactureDate = useMemo(() => {
-    const activeShiftWorkers = shifts
-      .filter((shift) => String(shift.date).slice(0, 10) === newBatch.manufactureDate)
-      .map((shift) => shift.employeeName);
-    return workers.filter((worker) => activeShiftWorkers.includes(worker.name));
-  }, [workers, shifts, newBatch.manufactureDate]);
+  useEffect(() => {
+    if (!currentUser || selectedBatchId) return;
+    if (acceptedBatchForCurrentUser) {
+      setSelectedBatchId(acceptedBatchForCurrentUser.id);
+    }
+  }, [currentUser, acceptedBatchForCurrentUser, selectedBatchId]);
 
   const handleLogin = async () => {
     try {
@@ -615,13 +864,11 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ login: login.trim(), password }),
       });
-
       const data = (await readJson(response)) as LoginResponse;
       if (!response.ok || !data.user || !data.token) {
         Alert.alert('Ошибка', data?.message || 'Неверный логин или пароль');
         return;
       }
-
       setToken(data.token);
       const nextUser = {
         id: String(data.user.id),
@@ -642,35 +889,67 @@ export default function App() {
     await AsyncStorage.removeItem('lizun_current_user');
     setCurrentUser(null);
     setSelectedBatchId(null);
+    setEditingBatchId(null);
+    setEditingShiftId(null);
+    setReportSelectedBatchId(null);
     setToken('');
     setLogin('');
     setPassword('');
     setCameraOpen(false);
   };
 
-  const createBatch = async () => {
+  const chooseProductName = () => {
+    setShowProductMenu((prev) => !prev);
+  };
+
+  const resetBatchForm = () => {
+    setEditingBatchId(null);
+    setShowProductMenu(false);
+    setNewBatch({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
+  };
+
+  const createOrUpdateBatch = async () => {
     if (!currentUser) return;
     if (!newBatch.productName.trim() || !newBatch.workerName.trim()) {
       Alert.alert('Ошибка', 'Заполните наименование изделия и выберите работника');
       return;
     }
-
     const worker = workers.find((w) => w.name === newBatch.workerName.trim());
     if (!worker) {
       Alert.alert('Ошибка', 'Рабочий не найден на сервере');
       return;
     }
-
-    const workerOnShift = shifts.some(
-      (shift) => String(shift.date).slice(0, 10) === newBatch.manufactureDate && shift.employeeName === worker.name,
-    );
+    const workerOnShift = shifts.some((shift) => shift.employeeType === 'worker' && shift.date === newBatch.manufactureDate && shift.employeeName === worker.name);
     if (!workerOnShift) {
       Alert.alert('Ошибка', 'Выбранный рабочий не отмечен в смене на эту дату');
       return;
     }
 
     try {
-      const batchResponse = await fetch(`${API_URL}/api/batches`, {
+      if (editingBatchId) {
+        const response = await fetch(`${API_URL}/api/batches/${editingBatchId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            product_name: newBatch.productName.trim(),
+            quantity: Number(newBatch.quantity || '0'),
+            assigned_worker_id: Number(worker.id),
+            editor_id: Number(currentUser.id),
+            manufacture_date: `${newBatch.manufactureDate}T00:00:00.000Z`,
+          }),
+        });
+        const data = await readJson(response);
+        if (!response.ok) {
+          Alert.alert('Ошибка', data?.message || 'Не удалось обновить партию');
+          return;
+        }
+        await syncAllFromServer();
+        resetBatchForm();
+        Alert.alert('Готово', 'Партия обновлена');
+        return;
+      }
+
+      const response = await fetch(`${API_URL}/api/batches`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -681,22 +960,100 @@ export default function App() {
           assigned_worker_id: Number(worker.id),
         }),
       });
-      const batchData = await readJson(batchResponse);
-      if (!batchResponse.ok || !batchData?.id) {
-        Alert.alert('Ошибка', batchData?.message || 'Не удалось создать партию');
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось создать партию');
         return;
       }
-
       await syncAllFromServer();
-      setNewBatch({
-        productName: '',
-        quantity: '1',
-        manufactureDate: todayStr(),
-        workerName: '',
-      });
-      Alert.alert('Готово', 'Партия создана и назначена выбранному рабочему');
+      resetBatchForm();
+      Alert.alert('Готово', 'Партия создана');
     } catch {
-      Alert.alert('Ошибка', 'Не удалось создать партию');
+      Alert.alert('Ошибка', 'Не удалось создать или обновить партию');
+    }
+  };
+
+  const editBatch = (batch: Batch) => {
+    setEditingBatchId(batch.id);
+    setNewBatch({
+      productName: batch.productName,
+      quantity: String(batch.quantity),
+      manufactureDate: batch.manufactureDate,
+      workerName: batch.workerName,
+    });
+    setShowProductMenu(false);
+    setScreen('batches');
+  };
+
+  const deleteBatch = (batch: Batch) => {
+    if (!currentUser) return;
+    Alert.alert('Удаление партии', `Удалить партию ${batch.batchNumber}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/batches/${batch.id}`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить партию');
+              return;
+            }
+            await syncAllFromServer();
+            if (editingBatchId === batch.id) resetBatchForm();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить партию');
+          }
+        },
+      },
+    ]);
+  };
+
+  const markBatchReadyToSend = async (batch: Batch) => {
+    if (!currentUser) return;
+    try {
+      const response = await fetch(`${API_URL}/api/batches/${batch.id}/mark-ready-to-send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось перевести партию в статус «Готова к отправке»');
+        return;
+      }
+      await syncAllFromServer();
+      Alert.alert('Готово', 'Партия переведена в статус «Готова к отправке»');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось обновить статус партии');
+    }
+  };
+
+  const sendBatchToAssembly = async (batch: Batch) => {
+    if (!currentUser) return;
+    try {
+      const response = await fetch(`${API_URL}/api/batches/${batch.id}/send-to-assembly`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось отправить партию на сборку');
+        return;
+      }
+      await syncAllFromServer();
+      setScreen('report');
+      setReportSelectedBatchId(batch.id);
+      if (selectedBatchId === batch.id) setSelectedBatchId(null);
+      Alert.alert('Готово', 'Партия отправлена на сборку и перенесена в отчеты');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось отправить партию на сборку');
     }
   };
 
@@ -714,23 +1071,19 @@ export default function App() {
   const pickImageFromGallery = async () => {
     try {
       const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-
       if (!permissionResult.granted) {
         Alert.alert('Нет доступа', 'Разрешите доступ к галерее');
         return;
       }
-
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         quality: 0.7,
         allowsEditing: false,
       });
-
       if (!result.canceled && result.assets?.length) {
         setInspectionForm((prev) => ({ ...prev, imageUri: result.assets[0].uri }));
       }
-    } catch (error) {
-      console.error('GALLERY PICK ERROR:', error);
+    } catch {
       Alert.alert('Ошибка', 'Не удалось выбрать изображение из галереи');
     }
   };
@@ -745,9 +1098,7 @@ export default function App() {
     setCameraOpen(false);
   };
 
-  const resetCapturedPhoto = () => {
-    setInspectionForm((prev) => ({ ...prev, imageUri: '' }));
-  };
+  const resetCapturedPhoto = () => setInspectionForm((prev) => ({ ...prev, imageUri: '' }));
 
   const performInference = async () => {
     if (!inspectionForm.imageUri) {
@@ -757,12 +1108,7 @@ export default function App() {
     try {
       setInferenceState({ loading: true, defect: 'Неопределено', confidence: 0, summary: '' });
       const result = await analyzeDefectViaApi(inspectionForm.imageUri);
-      setInferenceState({
-        loading: false,
-        defect: result.defect,
-        confidence: result.confidence,
-        summary: result.summary || '',
-      });
+      setInferenceState({ loading: false, defect: result.defect, confidence: result.confidence, summary: result.summary || '' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Не удалось получить ответ от AI API';
       setInferenceState({ loading: false, defect: 'Неопределено', confidence: 0, summary: '' });
@@ -780,82 +1126,121 @@ export default function App() {
       Alert.alert('Ошибка', 'Укажите количество бракованных изделий');
       return;
     }
-
-    setDetectedDefects((prev) => [
-      {
-        id: uid('D'),
-        defectClass: inferenceState.defect,
-        confidence: inferenceState.confidence,
-        affectedCount,
-        comment: defectComment.trim(),
-        imageUri: inspectionForm.imageUri || undefined,
-      },
-      ...prev,
-    ]);
+    setDetectedDefects((prev) => [{
+      id: uid('D'),
+      defectClass: inferenceState.defect,
+      confidence: inferenceState.confidence,
+      affectedCount,
+      comment: defectComment.trim(),
+      reviewStatus: 'На рассмотрении',
+      imageUri: inspectionForm.imageUri || undefined,
+    }, ...prev]);
     setDefectComment('');
     setInspectionForm((prev) => ({ ...prev, imageUri: '', rejectedCount: '0' }));
     setInferenceState({ loading: false, defect: 'Неопределено', confidence: 0, summary: '' });
   };
 
-  const removeDetectedDefect = (defectId: string) => {
-    setDetectedDefects((prev) => prev.filter((item) => item.id !== defectId));
-  };
+  const removeDetectedDefect = (defectId: string) => setDetectedDefects((prev) => prev.filter((item) => item.id !== defectId));
 
   const saveInspection = async () => {
-    if (!currentUser || !activeBatch) return;
+    if (!currentUser || !selectedBatch) return;
+    if (currentUser.role === 'Контролер' && !currentUserOnControlShift && !selectedInspection) {
+      Alert.alert('Недоступно', 'Контролер может принимать партии только если он на смене сегодня');
+      return;
+    }
     const acceptedCount = Number(inspectionForm.acceptedCount || '0');
     const rejectedTotal = detectedDefects.reduce((sum, item) => sum + item.affectedCount, 0);
-
-    setInspections((prev) => [
-      {
-        id: uid('I'),
-        batchId: activeBatch.id,
-        inspector: currentUser.name,
-        date: todayStr(),
-        visualConclusion: inspectionForm.visualConclusion.trim(),
-        geometryConclusion: inspectionForm.geometryConclusion.trim(),
-        defects: detectedDefects,
-        acceptedCount,
-        rejectedCount: rejectedTotal,
-        comment: inspectionForm.comment.trim(),
-      },
-      ...prev,
-    ]);
-
-    setBatches((prev) => prev.map((b) => (b.id === activeBatch.id ? { ...b, status: 'Проверена' } : b)));
-    setInspectionForm({
-      visualConclusion: '',
-      geometryConclusion: '',
-      acceptedCount: '0',
-      rejectedCount: '0',
+    const payload = {
+      batch_id: Number(selectedBatch.id),
+      inspector_id: Number(currentUser.id),
+      inspector_name: currentUser.name,
+      editor_id: Number(currentUser.id),
+      visual_conclusion: inspectionForm.visualConclusion.trim(),
+      geometry_conclusion: inspectionForm.geometryConclusion.trim(),
+      accepted_count: acceptedCount,
+      rejected_count: rejectedTotal,
       comment: '',
-      imageUri: '',
-    });
-    setDetectedDefects([]);
-    setDefectComment('');
-    setInferenceState({ loading: false, defect: 'Неопределено', confidence: 0, summary: '' });
+      defects: detectedDefects.map((item) => ({
+        defect_class: item.defectClass,
+        confidence: item.confidence,
+        affected_count: item.affectedCount,
+        comment: item.comment,
+        review_status: item.reviewStatus,
+        image_uri: item.imageUri,
+      })),
+    };
 
-    Alert.alert(
-      'Готово',
-      'Контроль сохранён локально в приложении. Серверные маршруты для отчётов добавим следующим шагом.',
-    );
-  };
-
-  const updateDefectStatus = async (defectId: string, reviewStatus: DefectReviewStatus) => {
     try {
-      const response = await fetch(`${API_URL}/api/inspection-defects/${defectId}/status`, {
-        method: 'PUT',
+      const url = selectedInspection ? `${API_URL}/api/inspections/${selectedInspection.id}` : `${API_URL}/api/inspections`;
+      const method = selectedInspection ? 'PUT' : 'POST';
+      const response = await fetch(url, {
+        method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ review_status: reviewStatus }),
+        body: JSON.stringify(payload),
       });
       const data = await readJson(response);
       if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось изменить статус брака');
+        Alert.alert('Ошибка', data?.message || 'Не удалось сохранить контроль');
         return;
       }
       await syncAllFromServer();
+      setSelectedBatchId(null);
+      setIsControlEditMode(false);
+      setScreen('batches');
+      Alert.alert('Готово', selectedInspection ? 'Контроль обновлен' : 'Контроль сохранен');
     } catch {
-      Alert.alert('Ошибка', 'Не удалось изменить статус брака');
+      Alert.alert('Ошибка', 'Не удалось сохранить контроль');
+    }
+  };
+
+  const acceptBatchForInspection = async (batch: Batch) => {
+    if (!currentUser) return;
+    if (currentUser.role === 'Контролер' && !currentUserOnControlShift) {
+      Alert.alert('Недоступно', 'Контролер может принимать партии только если он назначен на смену сегодня');
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/batches/${batch.id}/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: Number(currentUser.id) }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось принять партию');
+        return;
+      }
+      await syncAllFromServer();
+      setSelectedBatchId(batch.id);
+      setScreen('inspection');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось принять партию');
+    }
+  };
+
+
+  const goToInspection = (batch: Batch) => {
+    setSelectedBatchId(batch.id);
+    setScreen('inspection');
+  };
+
+  const cancelAcceptedBatch = async (batch: Batch) => {
+    if (!currentUser) return;
+    try {
+      const response = await fetch(`${API_URL}/api/batches/${batch.id}/cancel-accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: Number(currentUser.id) }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось отменить контроль');
+        return;
+      }
+      await syncAllFromServer();
+      if (selectedBatchId === batch.id) setSelectedBatchId(null);
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось отменить контроль');
     }
   };
 
@@ -865,11 +1250,6 @@ export default function App() {
       Alert.alert('Ошибка', 'Введите имя рабочего');
       return;
     }
-    if (workers.some((w) => w.name.toLowerCase() === name.toLowerCase())) {
-      Alert.alert('Ошибка', 'Такой рабочий уже существует');
-      return;
-    }
-
     const response = await fetch(`${API_URL}/api/workers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -880,71 +1260,379 @@ export default function App() {
       Alert.alert('Ошибка', data?.message || 'Не удалось добавить рабочего');
       return;
     }
-
     await syncAllFromServer();
     setNewWorkerName('');
     Alert.alert('Готово', 'Рабочий добавлен');
   };
 
-  const addShift = async () => {
-    if (!currentUser) return;
-    if (!shiftDate || !shiftEmployeeName.trim()) {
-      Alert.alert('Ошибка', 'Укажите дату и рабочего');
-      return;
-    }
 
-    const worker = workers.find((w) => w.name === shiftEmployeeName.trim());
-    if (!worker) {
-      Alert.alert('Ошибка', 'Рабочий не найден');
-      return;
-    }
-
-    const response = await fetch(`${API_URL}/api/shifts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        worker_id: Number(worker.id),
-        shift_date: shiftDate,
-        shift_type: 'day',
-        assigned_by: Number(currentUser.id),
-      }),
-    });
-    const data = await readJson(response);
-    if (!response.ok) {
-      Alert.alert('Ошибка', data?.message || 'Не удалось отметить выход на смену');
-      return;
-    }
-
-    await syncAllFromServer();
-    Alert.alert('Готово', 'Рабочий отмечен на смене');
+  const startEditUser = (user: User) => {
+    setEditingUserId(user.id);
+    setUserForm({ name: user.name, login: user.login, password: '', role: user.role });
+    setScreen('admin');
   };
 
-  const renderBatchCard = (batch: Batch) => {
-    const lastInspection = inspections.find((i) => i.batchId === batch.id);
+  const saveUser = async () => {
+    if (!currentUser || !editingUserId) return;
+    try {
+      const response = await fetch(`${API_URL}/api/users/${editingUserId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          full_name: userForm.name.trim(),
+          login: userForm.login.trim(),
+          password: userForm.password,
+          role: userForm.role,
+          editor_role: currentUser.role,
+        }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось обновить пользователя');
+        return;
+      }
+      await syncAllFromServer();
+      setEditingUserId(null);
+      setUserForm({ name: '', login: '', password: '', role: 'Контролер' });
+      Alert.alert('Готово', 'Пользователь обновлен');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось обновить пользователя');
+    }
+  };
+
+  const deleteUser = (user: User) => {
+    if (!currentUser) return;
+    Alert.alert('Удаление пользователя', `Удалить пользователя ${user.name}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/users/${user.id}`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ editor_role: currentUser.role }),
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить пользователя');
+              return;
+            }
+            await syncAllFromServer();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить пользователя');
+          }
+        },
+      },
+    ]);
+  };
+
+  const startEditWorker = (worker: Worker) => {
+    setEditingWorkerId(worker.id);
+    setWorkerFormName(worker.name);
+    setScreen('admin');
+  };
+
+  const saveWorker = async () => {
+    if (!currentUser || !editingWorkerId) return;
+    try {
+      const response = await fetch(`${API_URL}/api/workers/${editingWorkerId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ full_name: workerFormName.trim(), editor_role: currentUser.role }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось обновить рабочего');
+        return;
+      }
+      await syncAllFromServer();
+      setEditingWorkerId(null);
+      setWorkerFormName('');
+      Alert.alert('Готово', 'Рабочий обновлен');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось обновить рабочего');
+    }
+  };
+
+  const deleteWorker = (worker: Worker) => {
+    if (!currentUser) return;
+    Alert.alert('Удаление рабочего', `Удалить рабочего ${worker.name}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/workers/${worker.id}`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ editor_role: currentUser.role }),
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить рабочего');
+              return;
+            }
+            await syncAllFromServer();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить рабочего');
+          }
+        },
+      },
+    ]);
+  };
+
+  const selectedScheduleEmployeeType: ShiftEmployeeType =
+    currentUser?.role === 'Контрольный мастер'
+      ? 'controller'
+      : currentUser?.role === 'Администратор'
+      ? adminScheduleType
+      : 'worker';
+
+  const scheduleCandidates = selectedScheduleEmployeeType === 'worker' ? workers : controllers;
+
+  const createOrUpdateShift = async () => {
+    if (!currentUser) return;
+    if (!shiftDate || !shiftEmployeeName.trim()) {
+      Alert.alert('Ошибка', 'Укажите дату и сотрудника');
+      return;
+    }
+    const selectedEmployee = scheduleCandidates.find((item) => item.name === shiftEmployeeName.trim());
+    if (!selectedEmployee) {
+      Alert.alert('Ошибка', 'Сотрудник не найден');
+      return;
+    }
+
+    try {
+      if (editingShiftId) {
+        const response = await fetch(`${API_URL}/api/shifts/${editingShiftId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shift_date: shiftDate, editor_id: Number(currentUser.id) }),
+        });
+        const data = await readJson(response);
+        if (!response.ok) {
+          Alert.alert('Ошибка', data?.message || 'Не удалось обновить смену');
+          return;
+        }
+        await syncAllFromServer();
+        setEditingShiftId(null);
+        setShiftEmployeeName('');
+        setShiftDate(todayStr());
+        Alert.alert('Готово', 'Смена обновлена');
+        return;
+      }
+
+      const body = selectedScheduleEmployeeType === 'worker'
+        ? { worker_id: Number((selectedEmployee as Worker).id), shift_date: shiftDate, shift_type: 'day', assigned_by: Number(currentUser.id), employee_type: 'worker' }
+        : { user_id: Number((selectedEmployee as User).id), shift_date: shiftDate, shift_type: 'day', assigned_by: Number(currentUser.id), employee_type: 'controller' };
+
+      const response = await fetch(`${API_URL}/api/shifts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось создать смену');
+        return;
+      }
+      await syncAllFromServer();
+      setShiftEmployeeName('');
+      Alert.alert('Готово', 'Сотрудник назначен на смену');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось сохранить смену');
+    }
+  };
+
+  const editShift = (shift: Shift) => {
+    setEditingShiftId(shift.id);
+    setShiftDate(shift.date);
+    setShiftEmployeeName(shift.employeeName);
+    setAdminScheduleType(shift.employeeType);
+    setScreen('schedule');
+  };
+
+  const deleteShift = (shift: Shift) => {
+    if (!currentUser) return;
+    Alert.alert('Удаление смены', `Удалить смену ${shift.employeeName} на ${shift.date}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/shifts/${shift.id}`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить смену');
+              return;
+            }
+            await syncAllFromServer();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить смену');
+          }
+        },
+      },
+    ]);
+  };
+
+  const openReportBatch = (batchId: string) => {
+    setReportSelectedBatchId(batchId);
+    setScreen('report');
+  };
+
+  const renderInspectionPreview = (inspection?: Inspection | null) => {
+    if (!inspection) return null;
+    return (
+      <View style={styles.cardSoft}>
+        <Text style={styles.cardSubTitle}>Последний контроль</Text>
+        <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection.date)}</Text>
+        <Text style={styles.text}>Проверил: {inspection.inspector}</Text>
+        <Text style={styles.text}>Годных: {inspection.acceptedCount}</Text>
+        <Text style={styles.text}>Бракованных: {inspection.rejectedCount}</Text>
+      </View>
+    );
+  };
+
+  const renderBatchCard = (batch: Batch, mode: 'list' | 'report' = 'list') => {
+    const inspection = inspections.find((item) => item.batchId === batch.id);
+    const isExpandedReportCard = mode === 'report' && reportSelectedBatchId === batch.id;
+    const canEditBatch = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к проверке';
+    const canMarkReadyToSend = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
+    const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к отправке';
+    const canDeleteAnyBatch = currentUser?.role === 'Администратор';
+    const canAcceptBatch =
+      mode === 'list' &&
+      (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер') &&
+      batch.status === 'Готова к проверке' &&
+      !batch.acceptedByUserId &&
+      (currentUser?.role !== 'Контролер' || currentUserOnControlShift);
+
+    const canGoToInspection =
+      mode === 'list' &&
+      !!currentUser &&
+      batch.acceptedByUserId === currentUser.id &&
+      batch.status === 'Готова к проверке';
+
+    const canEditCheckedInspection =
+      mode === 'list' &&
+      !!currentUser &&
+      !!inspection &&
+      inspection.inspectorId === currentUser.id &&
+      batch.status === 'Проверена';
+
+    const onOpenCard = () => {
+      if (mode === 'report') {
+        setReportSelectedBatchId((prev) => (prev === batch.id ? null : batch.id));
+      } else if (canGoToInspection || canEditCheckedInspection) {
+        goToInspection(batch);
+      } else {
+        setSelectedBatchId(batch.id);
+      }
+    };
 
     return (
-      <View key={batch.id} style={styles.card}>
+      <View key={`${mode}-${batch.id}`} style={styles.card}>
         <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>{batch.productName}</Text>
+          <Pressable onPress={onOpenCard}>
+            <Text style={[styles.cardTitle, mode === 'report' && styles.linkText]}>{batch.productName}</Text>
+          </Pressable>
           <StatusBadge status={batch.status} />
         </View>
-        <Text style={styles.text}>ID партии: {batch.id}</Text>
-        <Text style={styles.text}>Количество: {batch.quantity}</Text>
-        <Text style={styles.text}>Дата: {batch.manufactureDate}</Text>
-        <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
+        <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
+        <Text style={styles.text}>Дата: {formatDisplayDate(mode === 'report' && batch.sentToAssemblyAt ? batch.sentToAssemblyAt : batch.manufactureDate)}</Text>
+        {(mode !== 'report' || batch.status === 'Готова к отправке' || isExpandedReportCard) && (
+          <>
+            <Text style={styles.text}>Количество: {batch.quantity}</Text>
+            <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
+            {mode === 'report' && batch.sentToAssemblyAt && isExpandedReportCard && <Text style={styles.text}>Отправлена: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>}
+            {inspection && (mode !== 'report' || isExpandedReportCard || batch.status === 'Готова к отправке') && renderInspectionPreview(inspection)}
+          </>
+        )}
 
-        {lastInspection && (
+        {mode === 'report' && isExpandedReportCard && inspection && (
           <View style={styles.cardSoft}>
-            <Text style={styles.cardSubTitle}>Последний отчёт</Text>
-            <Text style={styles.text}>Дата контроля: {lastInspection.date}</Text>
-            <Text style={styles.text}>Проверил: {lastInspection.inspector}</Text>
-            <Text style={styles.text}>Годных: {lastInspection.acceptedCount}</Text>
-            <Text style={styles.text}>Бракованных: {lastInspection.rejectedCount}</Text>
+            <Text style={styles.cardSubTitle}>Данные контроля</Text>
+            <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection.date)}</Text>
+            <Text style={styles.text}>Проверил: {inspection.inspector}</Text>
+            <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
+            <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
+            <Text style={styles.text}>Годных изделий: {inspection.acceptedCount}</Text>
+            <Text style={styles.text}>Бракованных изделий: {inspection.rejectedCount}</Text>
+            <Text style={styles.cardSubTitle}>Обнаруженные дефекты</Text>
+            {inspection.defects.length === 0 ? (
+              <Text style={styles.text}>Дефекты не зафиксированы.</Text>
+            ) : (
+              inspection.defects.map((defect) => (
+                <View key={defect.id} style={styles.historyItem}>
+                  <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
+                  <Text style={styles.text}>Уверенность AI: {(defect.confidence * 100).toFixed(1)}%</Text>
+                  <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
+                  <Text style={styles.text}>Статус брака: {defect.reviewStatus}</Text>
+                  {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
+                </View>
+              ))
+            )}
           </View>
+        )}
+
+        {mode === 'list' && canAcceptBatch && (
+          <Pressable style={styles.primaryButton} onPress={() => acceptBatchForInspection(batch)}>
+            <Text style={styles.primaryButtonText}>Принять партию</Text>
+          </Pressable>
+        )}
+
+        {mode === 'list' && canGoToInspection && (
+          <Pressable style={styles.primaryButton} onPress={() => goToInspection(batch)}>
+            <Text style={styles.primaryButtonText}>Перейти к контролю</Text>
+          </Pressable>
+        )}
+
+        {mode === 'list' && canEditCheckedInspection && (
+          <Pressable style={styles.secondaryButton} onPress={() => goToInspection(batch)}>
+            <Text style={styles.secondaryButtonText}>Изменить</Text>
+          </Pressable>
+        )}
+
+        {mode === 'list' && canEditBatch && (
+          <View style={styles.actionsWrap}>
+            <Pressable style={styles.secondaryButton} onPress={() => editBatch(batch)}>
+              <Text style={styles.secondaryButtonText}>Редактировать</Text>
+            </Pressable>
+            <Pressable style={styles.dangerButton} onPress={() => deleteBatch(batch)}>
+              <Text style={styles.dangerButtonText}>Удалить</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {mode === 'list' && canMarkReadyToSend && (
+          <Pressable style={styles.primaryButton} onPress={() => markBatchReadyToSend(batch)}>
+            <Text style={styles.primaryButtonText}>Подготовить к отправке</Text>
+          </Pressable>
+        )}
+
+        {mode === 'report' && canSendToAssembly && (
+          <Pressable style={styles.primaryButton} onPress={() => sendBatchToAssembly(batch)}>
+            <Text style={styles.primaryButtonText}>Отправить на сборку</Text>
+          </Pressable>
+        )}
+
+        {canDeleteAnyBatch && (
+          <Pressable style={styles.dangerButton} onPress={() => deleteBatch(batch)}>
+            <Text style={styles.dangerButtonText}>Удалить запись</Text>
+          </Pressable>
         )}
       </View>
     );
   };
+
 
   if (cameraOpen) {
     return (
@@ -953,10 +1641,7 @@ export default function App() {
           <View style={styles.cameraOverlay}>
             <Text style={styles.cameraTitle}>Сделайте снимок дефекта</Text>
             <View style={styles.cameraActions}>
-              <Pressable
-                style={styles.secondaryButton}
-                onPress={() => setCameraFacing((prev) => (prev === 'back' ? 'front' : 'back'))}
-              >
+              <Pressable style={styles.secondaryButton} onPress={() => setCameraFacing((prev) => (prev === 'back' ? 'front' : 'back'))}>
                 <Text style={styles.secondaryButtonText}>Сменить камеру</Text>
               </Pressable>
               <Pressable style={styles.captureButton} onPress={capturePhoto}>
@@ -974,11 +1659,13 @@ export default function App() {
 
   const showInspectionTab =
     currentUser?.role === 'Контролер' ||
+    currentUser?.role === 'Контрольный мастер';
+
+  const showScheduleTab =
+    currentUser?.role === 'Производственный мастер' ||
     currentUser?.role === 'Контрольный мастер' ||
     currentUser?.role === 'Администратор';
 
-  const showScheduleTab =
-    currentUser?.role === 'Производственный мастер' || currentUser?.role === 'Администратор';
 
   if (!appReady) {
     return (
@@ -1027,24 +1714,19 @@ export default function App() {
               <Text style={styles.topRole}>{currentUser.role}</Text>
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
-            <Pressable style={styles.secondaryButton} onPress={handleLogout}>
-              <Text style={styles.secondaryButtonText}>Выход</Text>
+            <Pressable style={styles.iconButton} onPress={handleLogout}>
+              <Text style={styles.iconButtonText}>↩</Text>
             </Pressable>
           </View>
 
           <View style={styles.navRow}>
             <TabButton title="Главная" active={screen === 'dashboard'} onPress={() => setScreen('dashboard')} />
             <TabButton title="Партии" active={screen === 'batches'} onPress={() => setScreen('batches')} />
-            {showInspectionTab && (
-              <TabButton title="Контроль" active={screen === 'inspection'} onPress={() => setScreen('inspection')} />
-            )}
+            {showInspectionTab && <TabButton title="Контроль" active={screen === 'inspection'} onPress={() => setScreen('inspection')} />}
             <TabButton title="Отчёты" active={screen === 'report'} onPress={() => setScreen('report')} />
-            {showScheduleTab && (
-              <TabButton title="Смены" active={screen === 'schedule'} onPress={() => setScreen('schedule')} />
-            )}
-            {currentUser.role === 'Администратор' && (
-              <TabButton title="Админ" active={screen === 'admin'} onPress={() => setScreen('admin')} />
-            )}
+            <TabButton title="Брак" active={screen === 'defects'} onPress={() => setScreen('defects')} />
+            {showScheduleTab && <TabButton title="Смены" active={screen === 'schedule'} onPress={() => setScreen('schedule')} />}
+            {currentUser.role === 'Администратор' && <TabButton title="Админ" active={screen === 'admin'} onPress={() => setScreen('admin')} />}
           </View>
 
           {screen === 'dashboard' && (
@@ -1054,7 +1736,7 @@ export default function App() {
                 <StatCard title="Партий за месяц" value={String(stats.total)} />
                 <StatCard title="Готовы к проверке" value={String(stats.readyCheck)} />
                 <StatCard title="Проверены" value={String(stats.checked)} />
-                <StatCard title="Отправлены на сборку" value={String(stats.sentToAssembly)} />
+                <StatCard title="Готовы к отправке" value={String(stats.readyToSend)} />
               </View>
             </View>
           )}
@@ -1064,161 +1746,183 @@ export default function App() {
               <SectionTitle title="Партии" />
               {(currentUser.role === 'Производственный мастер' || currentUser.role === 'Администратор') && (
                 <View style={styles.card}>
-                  <Text style={styles.cardTitle}>Создание партии</Text>
+                  <Text style={styles.cardTitle}>{editingBatchId ? 'Редактирование партии' : 'Создание партии'}</Text>
                   <Label text="Наименование изделия" />
-                  <TextInput
-                    style={styles.input}
-                    value={newBatch.productName}
-                    onChangeText={(value) => setNewBatch((prev) => ({ ...prev, productName: value }))}
-                  />
+                  <Pressable style={styles.datePickerButton} onPress={chooseProductName}>
+                    <Text style={styles.datePickerButtonText}>{newBatch.productName || 'Выбрать изделие'}</Text>
+                  </Pressable>
+                  {showProductMenu && (
+                    <View style={styles.dropdownMenu}>
+                      {PRODUCT_OPTIONS.map((option) => (
+                        <Pressable
+                          key={option}
+                          style={[styles.dropdownItem, newBatch.productName === option && styles.dropdownItemActive]}
+                          onPress={() => {
+                            setNewBatch((prev) => ({ ...prev, productName: option }));
+                            setShowProductMenu(false);
+                          }}
+                        >
+                          <Text style={[styles.dropdownItemText, newBatch.productName === option && styles.dropdownItemTextActive]}>{option}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  )}
                   <Label text="Количество" />
-                  <TextInput
-                    style={styles.input}
-                    keyboardType="numeric"
-                    value={newBatch.quantity}
-                    onChangeText={(value) => setNewBatch((prev) => ({ ...prev, quantity: value }))}
-                  />
+                  <TextInput style={styles.input} keyboardType="numeric" value={newBatch.quantity} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, quantity: value }))} />
                   <Label text="Дата изготовления" />
-                  <TextInput
-                    style={styles.input}
-                    value={newBatch.manufactureDate}
-                    onChangeText={(value) => setNewBatch((prev) => ({ ...prev, manufactureDate: value }))}
-                    placeholder="YYYY-MM-DD"
-                    placeholderTextColor={COLORS.muted}
-                  />
+                  <TextInput style={styles.input} value={newBatch.manufactureDate} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, manufactureDate: value }))} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} />
                   <Label text="Рабочий на смене" />
                   <View style={styles.roleRow}>
                     {workersOnSelectedManufactureDate.length === 0 ? (
                       <Text style={styles.text}>На выбранную дату нет рабочих в смене.</Text>
                     ) : (
                       workersOnSelectedManufactureDate.map((worker) => (
-                        <Pressable
-                          key={worker.id}
-                          style={[styles.roleButton, newBatch.workerName === worker.name && styles.roleButtonActive]}
-                          onPress={() => setNewBatch((prev) => ({ ...prev, workerName: worker.name }))}
-                        >
-                          <Text
-                            style={[styles.roleButtonText, newBatch.workerName === worker.name && styles.roleButtonTextActive]}
-                          >
-                            {worker.name}
-                          </Text>
+                        <Pressable key={worker.id} style={[styles.roleButton, newBatch.workerName === worker.name && styles.roleButtonActive]} onPress={() => setNewBatch((prev) => ({ ...prev, workerName: worker.name }))}>
+                          <Text style={[styles.roleButtonText, newBatch.workerName === worker.name && styles.roleButtonTextActive]}>{worker.name}</Text>
                         </Pressable>
                       ))
                     )}
                   </View>
-                  <Pressable style={styles.primaryButton} onPress={createBatch}>
-                    <Text style={styles.primaryButtonText}>Создать партию</Text>
+                  <Pressable style={styles.primaryButton} onPress={createOrUpdateBatch}>
+                    <Text style={styles.primaryButtonText}>{editingBatchId ? 'Сохранить изменения' : 'Создать партию'}</Text>
                   </Pressable>
+                  {editingBatchId && (
+                    <Pressable style={styles.secondaryButton} onPress={resetBatchForm}>
+                      <Text style={styles.secondaryButtonText}>Отменить редактирование</Text>
+                    </Pressable>
+                  )}
                 </View>
               )}
 
-              {visibleBatchesPage.length === 0 ? (
-                <View style={styles.card}>
-                  <Text style={styles.text}>Нет партий для отображения.</Text>
+              {currentUser.role === 'Контролер' && !currentUserOnControlShift && (
+                <View style={[styles.card, styles.warningCard]}>
+                  <Text style={styles.warningText}>Вы не назначены на смену на сегодня, поэтому не можете принять новую партию.</Text>
                 </View>
+              )}
+
+              {filteredBatchesForCurrentUser.length === 0 ? (
+                <View style={styles.card}><Text style={styles.text}>Нет партий для отображения.</Text></View>
               ) : (
-                visibleBatchesPage.map((batch) => renderBatchCard(batch))
+                filteredBatchesForCurrentUser.map((batch) => renderBatchCard(batch, 'list'))
               )}
             </View>
           )}
 
           {screen === 'inspection' && (
             <View>
-              <SectionTitle title="Контроль" />
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Выберите партию для контроля</Text>
-                <View style={styles.roleRow}>
-                  {batches
-                    .filter((b) => b.status === 'Готова к проверке' || b.id === selectedBatchId)
-                    .map((batch) => (
-                      <Pressable
-                        key={batch.id}
-                        style={[styles.roleButton, selectedBatchId === batch.id && styles.roleButtonActive]}
-                        onPress={() => setSelectedBatchId(batch.id)}
-                      >
-                        <Text
-                          style={[styles.roleButtonText, selectedBatchId === batch.id && styles.roleButtonTextActive]}
-                        >
-                          {batch.productName} #{batch.id}
-                        </Text>
-                      </Pressable>
-                    ))}
-                </View>
+              <View style={styles.inspectionHeader}>
+                <SectionTitle title="Контроль" />
+                <Pressable
+                  style={styles.smallCloseButton}
+                  onPress={() => {
+                    if (!selectedBatch) {
+                      setSelectedBatchId(null);
+                      setIsControlEditMode(false);
+                      return;
+                    }
+                    Alert.alert('Отменить процесс?', '', [
+                      { text: 'Нет', style: 'cancel' },
+                      {
+                        text: 'Да',
+                        style: 'destructive',
+                        onPress: async () => {
+                          if (canCancelAcceptedBatch) {
+                            await cancelAcceptedBatch(selectedBatch);
+                            setSelectedBatchId(null);
+                            setIsControlEditMode(false);
+                            return;
+                          }
+                          setSelectedBatchId(null);
+                          setIsControlEditMode(false);
+                        },
+                      },
+                    ]);
+                  }}
+                >
+                  <Text style={styles.smallCloseButtonText}>×</Text>
+                </Pressable>
               </View>
-
-              {!activeBatch ? (
-                <View style={styles.card}>
-                  <Text style={styles.text}>Сначала выберите партию.</Text>
+              {currentUser.role === 'Контролер' && !currentUserOnControlShift && (
+                <View style={[styles.card, styles.warningCard]}>
+                  <Text style={styles.warningText}>Контролер не назначен на смену сегодня и не может принимать новые партии.</Text>
                 </View>
+              )}
+              {!selectedBatch ? (
+                <View style={styles.card}><Text style={styles.text}>Сначала примите партию в разделе «Партии».</Text></View>
               ) : (
                 <>
                   <View style={styles.card}>
-                    <Text style={styles.cardTitle}>{activeBatch.productName}</Text>
-                    <Text style={styles.text}>Партия: {activeBatch.id}</Text>
-                    <Text style={styles.text}>Количество: {activeBatch.quantity}</Text>
-                    <Text style={styles.text}>Работник: {activeBatch.workerName || 'Не назначен'}</Text>
+                    <Text style={styles.cardTitle}>{selectedBatch.productName}</Text>
+                    <Text style={styles.text}>Партия: {selectedBatch.batchNumber}</Text>
+                    <Text style={styles.text}>Количество: {selectedBatch.quantity}</Text>
+                    <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
+                    <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
                   </View>
+
+
+                  {selectedBatch.status === 'Проверена' && selectedInspection && selectedInspection.inspectorId !== currentUser.id && (
+                    <View style={[styles.card, styles.warningCard]}>
+                      <Text style={styles.warningText}>Партия уже проверена. Изменять ее до отправки на сборку может только {selectedInspection.inspector}.</Text>
+                    </View>
+                  )}
+
+                  {selectedBatch.status === 'Готова к отправке' && (
+                    <View style={[styles.card, styles.warningCard]}>
+                      <Text style={styles.warningText}>Партия подготовлена к отправке. Редактирование контроля недоступно.</Text>
+                    </View>
+                  )}
+
+                  {selectedBatch.status === 'Отправлено на сборку' && (
+                    <View style={[styles.card, styles.warningCard]}>
+                      <Text style={styles.warningText}>Партия уже отправлена на сборку. Редактирование недоступно.</Text>
+                    </View>
+                  )}
 
                   <View style={styles.card}>
                     <Text style={styles.cardTitle}>Результаты контроля</Text>
+                    {selectedInspection && canEditInspectionByCurrentUser && !isControlEditMode && (
+                      <Pressable style={styles.secondaryButton} onPress={() => setIsControlEditMode(true)}>
+                        <Text style={styles.secondaryButtonText}>Изменить</Text>
+                      </Pressable>
+                    )}
                     <Label text="Изображение для анализа" />
-                    {!inspectionForm.imageUri && (
+                    {!inspectionForm.imageUri && !inspectionLocked && (
                       <>
-                        <Pressable style={styles.primaryButton} onPress={openCamera}>
-                          <Text style={styles.primaryButtonText}>Открыть камеру</Text>
-                        </Pressable>
-                        <Pressable style={styles.secondaryButton} onPress={pickImageFromGallery}>
-                          <Text style={styles.secondaryButtonText}>Выбрать из галереи</Text>
-                        </Pressable>
+                        <Pressable style={styles.primaryButton} onPress={openCamera}><Text style={styles.primaryButtonText}>Открыть камеру</Text></Pressable>
+                        <Pressable style={styles.secondaryButton} onPress={pickImageFromGallery}><Text style={styles.secondaryButtonText}>Выбрать из галереи</Text></Pressable>
                       </>
                     )}
-
                     {!!inspectionForm.imageUri && (
                       <View style={styles.previewBox}>
                         <Image source={{ uri: inspectionForm.imageUri }} style={styles.imagePreview} />
-                        <View style={styles.actionsWrap}>
-                          <Pressable style={styles.secondaryButton} onPress={resetCapturedPhoto}>
-                            <Text style={styles.secondaryButtonText}>Удалить снимок</Text>
-                          </Pressable>
-                          <Pressable style={styles.secondaryButton} onPress={openCamera}>
-                            <Text style={styles.secondaryButtonText}>Переснять</Text>
-                          </Pressable>
-                        </View>
+                        {!inspectionLocked && (
+                          <View style={styles.actionsWrap}>
+                            <Pressable style={styles.secondaryButton} onPress={resetCapturedPhoto}><Text style={styles.secondaryButtonText}>Удалить снимок</Text></Pressable>
+                            <Pressable style={styles.secondaryButton} onPress={openCamera}><Text style={styles.secondaryButtonText}>Переснять</Text></Pressable>
+                          </View>
+                        )}
                       </View>
                     )}
 
-                    <Pressable style={styles.primaryButton} onPress={performInference}>
-                      <Text style={styles.primaryButtonText}>
-                        {inferenceState.loading ? 'Анализ...' : 'Запустить AI-анализ'}
-                      </Text>
-                    </Pressable>
+                    {!inspectionLocked && (
+                      <Pressable style={styles.primaryButton} onPress={performInference}>
+                        <Text style={styles.primaryButtonText}>{inferenceState.loading ? 'Анализ...' : 'Запустить AI-анализ'}</Text>
+                      </Pressable>
+                    )}
 
                     <View style={styles.aiBox}>
-                      <Text style={styles.text}>
-                        Класс дефекта: <Text style={styles.textBold}>{inferenceState.defect}</Text>
-                      </Text>
-                      <Text style={styles.text}>
-                        Уверенность: <Text style={styles.textBold}>{(inferenceState.confidence * 100).toFixed(1)}%</Text>
-                      </Text>
-                      {!!inferenceState.summary && (
-                        <Text style={[styles.text, { marginTop: 8 }]}>
-                          Комментарий AI: <Text style={styles.textBold}>{inferenceState.summary}</Text>
-                        </Text>
-                      )}
+                      <Text style={styles.text}>Класс дефекта: <Text style={styles.textBold}>{inferenceState.defect}</Text></Text>
+                      <Text style={styles.text}>Уверенность: <Text style={styles.textBold}>{(inferenceState.confidence * 100).toFixed(1)}%</Text></Text>
+                      {!!inferenceState.summary && <Text style={[styles.text, { marginTop: 8 }]}>Комментарий AI: <Text style={styles.textBold}>{inferenceState.summary}</Text></Text>}
                     </View>
 
                     <Label text="Комментарий к найденному дефекту" />
-                    <TextInput style={styles.textarea} multiline value={defectComment} onChangeText={setDefectComment} />
+                    <TextInput style={styles.textarea} multiline value={defectComment} onChangeText={setDefectComment} editable={!inspectionLocked} />
                     <Label text="Количество изделий с этим дефектом" />
-                    <TextInput
-                      style={styles.input}
-                      keyboardType="numeric"
-                      value={inspectionForm.rejectedCount}
-                      onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, rejectedCount: value }))}
-                    />
-                    <Pressable style={styles.primaryButton} onPress={addDetectedDefect}>
-                      <Text style={styles.primaryButtonText}>Добавить дефект в список</Text>
-                    </Pressable>
+                    <TextInput style={styles.input} keyboardType="numeric" value={inspectionForm.rejectedCount} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, rejectedCount: value }))} editable={!inspectionLocked} />
+                    {!inspectionLocked && (
+                      <Pressable style={styles.primaryButton} onPress={addDetectedDefect}><Text style={styles.primaryButtonText}>Добавить дефект в список</Text></Pressable>
+                    )}
 
                     <View style={styles.cardSoft}>
                       <Text style={styles.cardSubTitle}>Список дефектов по партии</Text>
@@ -1227,69 +1931,27 @@ export default function App() {
                       ) : (
                         detectedDefects.map((item, index) => (
                           <View key={item.id} style={styles.historyItem}>
-                            <Text style={styles.text}>
-                              <Text style={styles.textBold}>Дефект {index + 1}:</Text> {item.defectClass}
-                            </Text>
+                            <Text style={styles.text}><Text style={styles.textBold}>Дефект {index + 1}:</Text> {item.defectClass}</Text>
                             <Text style={styles.text}>Уверенность: {(item.confidence * 100).toFixed(1)}%</Text>
                             <Text style={styles.text}>Количество изделий с этим дефектом: {item.affectedCount}</Text>
                             <Text style={styles.text}>Комментарий: {item.comment || '—'}</Text>
                             {!!item.imageUri && <Image source={{ uri: item.imageUri }} style={styles.imagePreviewSmall} />}
-                            <Pressable style={styles.secondaryButton} onPress={() => removeDetectedDefect(item.id)}>
-                              <Text style={styles.secondaryButtonText}>Удалить дефект</Text>
-                            </Pressable>
+                            {!inspectionLocked && (
+                              <Pressable style={styles.secondaryButton} onPress={() => removeDetectedDefect(item.id)}><Text style={styles.secondaryButtonText}>Удалить дефект</Text></Pressable>
+                            )}
                           </View>
                         ))
                       )}
                     </View>
 
                     <Label text="Заключение визуального контроля" />
-                    <TextInput
-                      style={styles.textarea}
-                      multiline
-                      value={inspectionForm.visualConclusion}
-                      onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, visualConclusion: value }))}
-                    />
+                    <TextInput style={styles.textarea} multiline value={inspectionForm.visualConclusion} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, visualConclusion: value }))} editable={!inspectionLocked} />
                     <Label text="Заключение по конструктивным параметрам" />
-                    <TextInput
-                      style={styles.textarea}
-                      multiline
-                      value={inspectionForm.geometryConclusion}
-                      onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, geometryConclusion: value }))}
-                    />
+                    <TextInput style={styles.textarea} multiline value={inspectionForm.geometryConclusion} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, geometryConclusion: value }))} editable={!inspectionLocked} />
                     <Label text="Годных изделий" />
-                    <TextInput
-                      style={styles.input}
-                      keyboardType="numeric"
-                      value={inspectionForm.acceptedCount}
-                      onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, acceptedCount: value }))}
-                    />
-                    <Label text="Общий комментарий по партии" />
-                    <TextInput
-                      style={styles.textarea}
-                      multiline
-                      value={inspectionForm.comment}
-                      onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, comment: value }))}
-                    />
-                    <Pressable style={styles.primaryButton} onPress={saveInspection}>
-                      <Text style={styles.primaryButtonText}>Сохранить контроль</Text>
-                    </Pressable>
-                  </View>
-
-                  <View style={styles.card}>
-                    <Text style={styles.cardTitle}>История проверок</Text>
-                    {batchInspections.length === 0 ? (
-                      <Text style={styles.text}>Пока нет сохранённых проверок.</Text>
-                    ) : (
-                      batchInspections.map((item) => (
-                        <View key={item.id} style={styles.historyItem}>
-                          <Text style={styles.text}><Text style={styles.textBold}>Дата:</Text> {item.date}</Text>
-                          <Text style={styles.text}><Text style={styles.textBold}>Контролёр:</Text> {item.inspector}</Text>
-                          <Text style={styles.text}><Text style={styles.textBold}>Визуально:</Text> {item.visualConclusion}</Text>
-                          <Text style={styles.text}><Text style={styles.textBold}>Геометрия:</Text> {item.geometryConclusion}</Text>
-                          <Text style={styles.text}><Text style={styles.textBold}>Годных:</Text> {item.acceptedCount}</Text>
-                          <Text style={styles.text}><Text style={styles.textBold}>Брак:</Text> {item.rejectedCount}</Text>
-                        </View>
-                      ))
+                    <TextInput style={styles.input} keyboardType="numeric" value={inspectionForm.acceptedCount} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, acceptedCount: value }))} editable={!inspectionLocked} />
+                    {!inspectionLocked && (
+                      <Pressable style={styles.primaryButton} onPress={saveInspection}><Text style={styles.primaryButtonText}>{selectedInspection ? 'Сохранить изменения' : 'Сохранить контроль'}</Text></Pressable>
                     )}
                   </View>
                 </>
@@ -1302,54 +1964,76 @@ export default function App() {
               <SectionTitle title="Отчёты" />
 
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Фильтры</Text>
+                <Text style={styles.cardTitle}>Фильтр</Text>
                 <Label text="Дата от" />
                 <Pressable style={styles.datePickerButton} onPress={() => setShowReportFromPicker(true)}>
                   <Text style={styles.datePickerButtonText}>{reportDateFrom ? formatDisplayDate(reportDateFrom) : 'Выбрать дату'}</Text>
                 </Pressable>
                 {showReportFromPicker && (
-                  <DateTimePicker value={reportDateFrom ? new Date(reportDateFrom) : new Date()} mode="date" display="default" onChange={onChangeReportFromDate} />
+                  <DateTimePicker
+                    value={reportDateFrom ? new Date(reportDateFrom) : new Date()}
+                    mode="date"
+                    display="default"
+                    onChange={onChangeReportFromDate}
+                  />
                 )}
                 <Label text="Дата до" />
                 <Pressable style={styles.datePickerButton} onPress={() => setShowReportToPicker(true)}>
                   <Text style={styles.datePickerButtonText}>{reportDateTo ? formatDisplayDate(reportDateTo) : 'Выбрать дату'}</Text>
                 </Pressable>
                 {showReportToPicker && (
-                  <DateTimePicker value={reportDateTo ? new Date(reportDateTo) : new Date()} mode="date" display="default" onChange={onChangeReportToDate} />
+                  <DateTimePicker
+                    value={reportDateTo ? new Date(reportDateTo) : new Date()}
+                    mode="date"
+                    display="default"
+                    onChange={onChangeReportToDate}
+                  />
                 )}
                 <Label text="Статус брака" />
-                <View style={styles.roleRow}>
-                  {(['Все', 'Забраковано', 'На рассмотрении', 'Допущено до сборки'] as const).map((status) => (
-                    <Pressable key={status} style={[styles.roleButton, reportStatusFilter === status && styles.roleButtonActive]} onPress={() => setReportStatusFilter(status)}>
-                      <Text style={[styles.roleButtonText, reportStatusFilter === status && styles.roleButtonTextActive]}>{status}</Text>
+                <View style={styles.filterRow}>
+                  {(['Все', ...DEFECT_STATUS_OPTIONS] as const).map((status) => (
+                    <Pressable key={status} style={[styles.filterChip, reportDefectStatus === status && styles.filterChipActive]} onPress={() => setReportDefectStatus(status as any)}>
+                      <Text style={[styles.filterChipText, reportDefectStatus === status && styles.filterChipTextActive]}>{status}</Text>
                     </Pressable>
                   ))}
                 </View>
+                {(reportDateFrom || reportDateTo || reportDefectStatus !== 'Все') && (
+                  <Pressable
+                    style={styles.secondaryButton}
+                    onPress={() => {
+                      setReportDateFrom('');
+                      setReportDateTo('');
+                      setReportDefectStatus('Все');
+                    }}
+                  >
+                    <Text style={styles.secondaryButtonText}>Сбросить фильтр</Text>
+                  </Pressable>
+                )}
               </View>
 
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Готовы к отправке</Text>
-                {filteredReadyToSendBatches.length === 0 ? (
+                {readyToSendBatches.length === 0 ? (
                   <Text style={styles.text}>Нет партий, готовых к отправке.</Text>
                 ) : (
-                  filteredReadyToSendBatches.map((batch) => renderBatchCard(batch, 'report'))
+                  readyToSendBatches.map((batch) => renderBatchCard(batch, 'report'))
                 )}
               </View>
 
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Архив по месяцам</Text>
-                {Object.keys(filteredFolderedArchive).length === 0 ? (
+                {Object.keys(folderedArchive).length === 0 ? (
                   <Text style={styles.text}>Архивных партий пока нет.</Text>
                 ) : (
-                  Object.entries(filteredFolderedArchive).map(([folder, items]) => {
-                    const isExpandedMonth = expandedArchiveMonths.includes(folder);
+                  Object.entries(folderedArchive).map(([folder, items]) => {
+                    const isOpen = expandedArchiveMonths.includes(folder);
                     return (
                       <View key={folder} style={styles.cardSoft}>
                         <Pressable style={styles.rowBetween} onPress={() => setExpandedArchiveMonths((prev) => prev.includes(folder) ? prev.filter((item) => item !== folder) : [...prev, folder])}>
                           <Text style={styles.cardSubTitle}>{folder}</Text>
-                          <Text style={styles.textBold}>{isExpandedMonth ? '−' : '+'}</Text>
+                          <Text style={styles.text}>{isOpen ? '−' : '+'}</Text>
                         </Pressable>
-                        {isExpandedMonth && (items as Batch[]).map((batch) => renderBatchCard(batch, 'report'))}
+                        {isOpen && (items as Batch[]).map((batch) => renderBatchCard(batch, 'report'))}
                       </View>
                     );
                   })
@@ -1392,14 +2076,30 @@ export default function App() {
                                   <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
                                   <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
                                   <Text style={styles.text}>Статус: {defect.reviewStatus}</Text>
-                                  <View style={styles.statusButtonRow}>
-                                    {(['Забраковано', 'На рассмотрении', 'Допущено до сборки'] as DefectReviewStatus[]).map((status) => (
+                                  <View style={styles.filterRow}>
+                                    {DEFECT_STATUS_OPTIONS.map((status) => (
                                       <Pressable
                                         key={status}
-                                        style={[styles.statusOptionButton, defect.reviewStatus === status && styles.roleButtonActive]}
-                                        onPress={() => updateDefectStatus(defect.id, status)}
+                                        style={[styles.filterChip, defect.reviewStatus === status && styles.filterChipActive]}
+                                        onPress={async () => {
+                                          try {
+                                            const response = await fetch(`${API_URL}/api/inspection-defects/${defect.id}/status`, {
+                                              method: 'PUT',
+                                              headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ review_status: status }),
+                                            });
+                                            const data = await readJson(response);
+                                            if (!response.ok) {
+                                              Alert.alert('Ошибка', data?.message || 'Не удалось обновить статус брака');
+                                              return;
+                                            }
+                                            await syncAllFromServer();
+                                          } catch {
+                                            Alert.alert('Ошибка', 'Не удалось обновить статус брака');
+                                          }
+                                        }}
                                       >
-                                        <Text style={[styles.roleButtonText, defect.reviewStatus === status && styles.roleButtonTextActive]}>{status}</Text>
+                                        <Text style={[styles.filterChipText, defect.reviewStatus === status && styles.filterChipTextActive]}>{status}</Text>
                                       </Pressable>
                                     ))}
                                   </View>
@@ -1414,6 +2114,234 @@ export default function App() {
                 ))
               )}
             </View>
-          }
+          )}
 
-          ;
+          {screen === 'schedule' && showScheduleTab && (
+            <View>
+              <SectionTitle title="Смены" />
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>
+                  {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : currentUser.role === 'Администратор' ? 'Управление сменами' : 'Отметить выход на смену'}
+                </Text>
+                {currentUser.role === 'Администратор' && !editingShiftId && (
+                  <>
+                    <Label text="Тип сотрудника" />
+                    <View style={styles.roleRow}>
+                      <Pressable style={[styles.roleButton, adminScheduleType === 'worker' && styles.roleButtonActive]} onPress={() => setAdminScheduleType('worker')}>
+                        <Text style={[styles.roleButtonText, adminScheduleType === 'worker' && styles.roleButtonTextActive]}>Рабочий</Text>
+                      </Pressable>
+                      <Pressable style={[styles.roleButton, adminScheduleType === 'controller' && styles.roleButtonActive]} onPress={() => setAdminScheduleType('controller')}>
+                        <Text style={[styles.roleButtonText, adminScheduleType === 'controller' && styles.roleButtonTextActive]}>Контролер / КМ</Text>
+                      </Pressable>
+                    </View>
+                  </>
+                )}
+                <Label text="Дата" />
+                <Pressable style={styles.datePickerButton} onPress={openShiftDatePicker}>
+                  <Text style={styles.datePickerButtonText}>{shiftDate || 'Выбрать дату'}</Text>
+                </Pressable>
+                {showShiftDatePicker && (
+                  <DateTimePicker value={new Date(shiftDate)} mode="date" display="default" onChange={onChangeShiftDate} />
+                )}
+                <Label text={selectedScheduleEmployeeType === 'worker' ? 'Рабочий' : 'Контролер'} />
+                <View style={styles.roleRow}>
+                  {scheduleCandidates.map((employee) => (
+                    <Pressable
+                      key={employee.id}
+                      style={[styles.roleButton, shiftEmployeeName === employee.name && styles.roleButtonActive, !!editingShiftId && shiftEmployeeName !== employee.name && styles.disabledButton]}
+                      onPress={() => !editingShiftId && setShiftEmployeeName(employee.name)}
+                    >
+                      <Text style={[styles.roleButtonText, shiftEmployeeName === employee.name && styles.roleButtonTextActive]}>{employee.name}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Pressable style={styles.primaryButton} onPress={createOrUpdateShift}><Text style={styles.primaryButtonText}>{editingShiftId ? 'Сохранить смену' : 'Сохранить смену'}</Text></Pressable>
+                {editingShiftId && <Pressable style={styles.secondaryButton} onPress={() => { setEditingShiftId(null); setShiftEmployeeName(''); setShiftDate(todayStr()); }}><Text style={styles.secondaryButtonText}>Отменить редактирование</Text></Pressable>}
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Список смен</Text>
+                {visibleShifts.length === 0 ? (
+                  <Text style={styles.text}>На выбранную дату никто не отмечен в смене.</Text>
+                ) : (
+                  visibleShifts
+                    .filter((shift) => currentUser.role === 'Администратор' || (currentUser.role === 'Производственный мастер' ? shift.employeeType === 'worker' : currentUser.role === 'Контрольный мастер' ? shift.employeeType === 'controller' : true))
+                    .map((shift) => (
+                      <View key={shift.id} style={styles.historyItem}>
+                        <Text style={styles.text}><Text style={styles.textBold}>{formatDisplayDate(shift.date)}</Text></Text>
+                        <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
+                        <Text style={styles.text}>Тип: {shift.roleLabel || (shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер')}</Text>
+                        {(currentUser.role === 'Администратор' || shift.assignedBy === currentUser.id) && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
+                          <View style={styles.actionsWrap}>
+                            <Pressable style={styles.secondaryButton} onPress={() => editShift(shift)}><Text style={styles.secondaryButtonText}>Редактировать</Text></Pressable>
+                            <Pressable style={styles.dangerButton} onPress={() => deleteShift(shift)}><Text style={styles.dangerButtonText}>Удалить</Text></Pressable>
+                          </View>
+                        )}
+                      </View>
+                    ))
+                )}
+              </View>
+            </View>
+          )}
+
+          {screen === 'admin' && currentUser.role === 'Администратор' && (
+            <View>
+              <SectionTitle title="Панель администратора" />
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Пользователи</Text>
+                {editingUserId && (
+                  <View style={styles.cardSoft}>
+                    <Label text="Имя" />
+                    <TextInput style={styles.input} value={userForm.name} onChangeText={(value) => setUserForm((prev) => ({ ...prev, name: value }))} />
+                    <Label text="Логин" />
+                    <TextInput style={styles.input} value={userForm.login} onChangeText={(value) => setUserForm((prev) => ({ ...prev, login: value }))} />
+                    <Label text="Новый пароль" />
+                    <TextInput style={styles.input} value={userForm.password} onChangeText={(value) => setUserForm((prev) => ({ ...prev, password: value }))} placeholder="Оставьте пустым, чтобы не менять" placeholderTextColor={COLORS.muted} />
+                    <Label text="Роль" />
+                    <View style={styles.roleRow}>
+                      {(['Администратор', 'Производственный мастер', 'Контрольный мастер', 'Контролер'] as Role[]).map((role) => (
+                        <Pressable key={role} style={[styles.roleButton, userForm.role === role && styles.roleButtonActive]} onPress={() => setUserForm((prev) => ({ ...prev, role }))}>
+                          <Text style={[styles.roleButtonText, userForm.role === role && styles.roleButtonTextActive]}>{role}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <Pressable style={styles.primaryButton} onPress={saveUser}>
+                      <Text style={styles.primaryButtonText}>Сохранить пользователя</Text>
+                    </Pressable>
+                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingUserId(null); setUserForm({ name: '', login: '', password: '', role: 'Контролер' }); }}>
+                      <Text style={styles.secondaryButtonText}>Отмена</Text>
+                    </Pressable>
+                  </View>
+                )}
+                {users.map((u) => (
+                  <View key={u.id} style={styles.historyItem}>
+                    <Text style={styles.text}><Text style={styles.textBold}>{u.name}</Text></Text>
+                    <Text style={styles.text}>Логин: {u.login}</Text>
+                    <Text style={styles.text}>Роль: {u.role}</Text>
+                    <View style={styles.actionsWrap}>
+                      <Pressable style={styles.secondaryButton} onPress={() => startEditUser(u)}>
+                        <Text style={styles.secondaryButtonText}>Редактировать</Text>
+                      </Pressable>
+                      {u.id !== currentUser.id && (
+                        <Pressable style={styles.dangerButton} onPress={() => deleteUser(u)}>
+                          <Text style={styles.dangerButtonText}>Удалить</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  </View>
+                ))}
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Рабочие</Text>
+                <View style={styles.cardSoft}>
+                  <Label text={editingWorkerId ? 'Редактирование рабочего' : 'Новый рабочий'} />
+                  <TextInput style={styles.input} value={editingWorkerId ? workerFormName : newWorkerName} onChangeText={editingWorkerId ? setWorkerFormName : setNewWorkerName} />
+                  <Pressable style={styles.primaryButton} onPress={editingWorkerId ? saveWorker : () => addWorker()}>
+                    <Text style={styles.primaryButtonText}>{editingWorkerId ? 'Сохранить рабочего' : 'Добавить рабочего'}</Text>
+                  </Pressable>
+                  {editingWorkerId && (
+                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingWorkerId(null); setWorkerFormName(''); }}>
+                      <Text style={styles.secondaryButtonText}>Отмена</Text>
+                    </Pressable>
+                  )}
+                </View>
+                {workers.map((worker) => (
+                  <View key={worker.id} style={styles.historyItem}>
+                    <Text style={styles.text}>{worker.name}</Text>
+                    <View style={styles.actionsWrap}>
+                      <Pressable style={styles.secondaryButton} onPress={() => startEditWorker(worker)}>
+                        <Text style={styles.secondaryButtonText}>Редактировать</Text>
+                      </Pressable>
+                      <Pressable style={styles.dangerButton} onPress={() => deleteWorker(worker)}>
+                        <Text style={styles.dangerButtonText}>Удалить</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: '#020617' },
+  container: { padding: 16, alignItems: 'center' },
+  phone: { width: '100%', maxWidth: 520, backgroundColor: COLORS.bg, borderRadius: 24, padding: 16, minHeight: '100%' },
+  headerBlock: { marginBottom: 18 },
+  title: { color: COLORS.text, fontSize: 30, fontWeight: '800' },
+  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  topRole: { color: COLORS.accent2, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8 },
+  topName: { color: COLORS.text, fontSize: 20, fontWeight: '700', marginTop: 2 },
+  navRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 16, marginBottom: 18 },
+  tabButton: { backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12, marginRight: 8, marginBottom: 8 },
+  tabButtonActive: { backgroundColor: '#1d4ed8' },
+  tabButtonText: { color: COLORS.text, fontWeight: '600' },
+  card: { backgroundColor: COLORS.card, borderRadius: 18, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: COLORS.border },
+  cardSoft: { backgroundColor: '#162033', borderRadius: 14, padding: 12, marginTop: 12, borderWidth: 1, borderColor: COLORS.border },
+  cardTitle: { color: COLORS.text, fontSize: 18, fontWeight: '700', marginBottom: 10 },
+  cardSubTitle: { color: COLORS.text, fontSize: 16, fontWeight: '700', marginBottom: 8, marginTop: 8 },
+  text: { color: COLORS.text, fontSize: 14, lineHeight: 20, marginVertical: 2 },
+  textBold: { fontWeight: '700' },
+  label: { color: COLORS.muted, fontSize: 13, marginTop: 8, marginBottom: 6 },
+  input: { width: '100%', backgroundColor: '#0b1220', color: COLORS.text, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 8 },
+  textarea: { width: '100%', minHeight: 88, backgroundColor: '#0b1220', color: COLORS.text, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 8, textAlignVertical: 'top' },
+  primaryButton: { width: '100%', backgroundColor: COLORS.accent, borderRadius: 14, paddingVertical: 12, paddingHorizontal: 16, marginTop: 8, alignItems: 'center' },
+  primaryButtonText: { color: '#052e16', fontWeight: '800' },
+  secondaryButton: { backgroundColor: COLORS.soft, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
+  secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
+  iconButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  iconButtonText: { color: COLORS.text, fontSize: 20, fontWeight: '800' },
+  smallCloseButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  smallCloseButtonText: { color: COLORS.text, fontSize: 28, fontWeight: '700', lineHeight: 28 },
+  dangerButton: { backgroundColor: '#7f1d1d', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
+  dangerButtonText: { color: '#fee2e2', fontWeight: '700' },
+  sectionTitle: { color: COLORS.text, fontSize: 22, fontWeight: '700', marginBottom: 12 },
+  grid2: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 },
+  statCard: { width: '48%', backgroundColor: COLORS.card, borderRadius: 18, padding: 16, borderWidth: 1, borderColor: COLORS.border, marginRight: '2%', marginBottom: 10 },
+  statValue: { fontSize: 28, fontWeight: '800', color: COLORS.accent2 },
+  statTitle: { marginTop: 6, color: COLORS.muted, fontSize: 13 },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  inspectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  badge: { borderRadius: 999, paddingVertical: 6, paddingHorizontal: 10, marginLeft: 8 },
+  badgeText: { color: 'white', fontSize: 12, fontWeight: '700' },
+  actionsWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12, gap: 8 },
+  aiBox: { backgroundColor: '#082f49', borderWidth: 1, borderColor: '#0ea5e9', borderRadius: 14, padding: 12, marginTop: 12, marginBottom: 12 },
+  historyItem: { borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 10, marginTop: 10 },
+  previewBox: { backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 14, padding: 12, marginBottom: 12 },
+  imagePreview: { width: '100%', height: 260, borderRadius: 12, marginBottom: 12, backgroundColor: '#000' },
+  imagePreviewSmall: { width: '100%', height: 180, borderRadius: 10, marginTop: 8, marginBottom: 8, backgroundColor: '#000' },
+  roleRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8, marginTop: 4 },
+  roleButton: { backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12, marginRight: 8, marginBottom: 8 },
+  roleButtonActive: { backgroundColor: COLORS.accent2, borderColor: COLORS.accent2 },
+  roleButtonText: { color: COLORS.text, fontWeight: '600' },
+  roleButtonTextActive: { color: '#082f49', fontWeight: '800' },
+  disabledButton: { opacity: 0.55 },
+  datePickerButton: { width: '100%', backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 14, marginBottom: 8 },
+  datePickerButtonText: { color: COLORS.text, fontSize: 14 },
+  cameraScreen: { flex: 1, backgroundColor: 'black' },
+  cameraPreview: { flex: 1 },
+  cameraOverlay: { flex: 1, justifyContent: 'space-between', padding: 20, backgroundColor: 'rgba(0,0,0,0.15)' },
+  cameraTitle: { color: 'white', fontSize: 20, fontWeight: '700', marginTop: 20 },
+  cameraActions: { marginBottom: 24 },
+  captureButton: { backgroundColor: 'white', borderRadius: 16, paddingVertical: 14, alignItems: 'center', marginBottom: 12 },
+  captureButtonText: { color: '#111827', fontWeight: '800', fontSize: 16 },
+  warningCard: { borderColor: '#f59e0b', backgroundColor: '#451a03' },
+  warningText: { color: '#fde68a', fontWeight: '600', lineHeight: 20 },
+  linkText: { textDecorationLine: 'underline', color: COLORS.accent2 },
+  dropdownMenu: { backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, marginBottom: 8, overflow: 'hidden' },
+  dropdownItem: { paddingHorizontal: 14, paddingVertical: 12, borderTopWidth: 1, borderTopColor: COLORS.border },
+  dropdownItemActive: { backgroundColor: '#1e3a8a' },
+  dropdownItemText: { color: COLORS.text, fontSize: 15, fontWeight: '600' },
+  dropdownItemTextActive: { color: '#dbeafe' },
+  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  filterChip: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, marginBottom: 8 },
+  filterChipActive: { backgroundColor: COLORS.accent2, borderColor: COLORS.accent2 },
+  filterChipText: { color: COLORS.text, fontWeight: '600', fontSize: 12 },
+  filterChipTextActive: { color: '#082f49', fontWeight: '800' },
+  defectItemTitle: { color: COLORS.accent2, fontSize: 20, fontWeight: '700', textDecorationLine: 'underline', marginBottom: 4 },
+});
+
