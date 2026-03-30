@@ -25,7 +25,7 @@ type DefectClass =
   | 'Раковина'
   | 'Неопределено';
 
-type Screen = 'dashboard' | 'batches' | 'inspection' | 'report' | 'schedule' | 'admin';
+type Screen = 'dashboard' | 'batches' | 'inspection' | 'report' | 'schedule' | 'admin' | 'defects';
 
 type Batch = {
   id: string;
@@ -40,6 +40,7 @@ type Batch = {
   inspectorId?: string;
   inspectorName?: string;
   acceptedByUserId?: string;
+  sentToAssemblyAt?: string;
 };
 
 type DefectItem = {
@@ -139,6 +140,7 @@ type ApiBatchRow = {
   inspector_id?: number | string | null;
   inspector_name?: string | null;
   accepted_by_user_id?: number | string | null;
+  sent_to_assembly_at?: string | null;
 };
 
 type ApiShiftRow = {
@@ -205,6 +207,10 @@ const monthNames: Record<string, string> = {
   '11': 'Ноябрь',
   '12': 'Декабрь',
 };
+
+const PRODUCT_OPTIONS = ['Втулка', 'Переходник', 'Удлинитель', 'Корпус'] as const;
+type ProductOption = (typeof PRODUCT_OPTIONS)[number];
+
 
 function mapApiRoleToAppRole(role: string): Role {
   const roleMap: Record<string, Role> = {
@@ -332,6 +338,14 @@ function formatDisplayDate(value?: string) {
     return `${d}.${m}.${y}`;
   }
   return String(value);
+}
+
+function getArchiveDate(batch: Batch) {
+  return batch.sentToAssemblyAt || batch.manufactureDate;
+}
+
+function formatMonthFolderLabel(date: string) {
+  return monthFolderName(date);
 }
 
 function uid(prefix: string) {
@@ -465,8 +479,7 @@ export default function App() {
   const [shiftEmployeeName, setShiftEmployeeName] = useState('');
   const [showShiftDatePicker, setShowShiftDatePicker] = useState(false);
 
-  const [reportDateFrom, setReportDateFrom] = useState('');
-  const [reportDateTo, setReportDateTo] = useState('');
+  const [defectExpandedBatchId, setDefectExpandedBatchId] = useState<string | null>(null);
 
   const controllers = useMemo(
     () => users.filter((user) => user.role === 'Контролер' || user.role === 'Контрольный мастер'),
@@ -557,36 +570,42 @@ export default function App() {
   const readyToSendBatches = useMemo(
     () => batches
       .filter((b) => b.status === 'Готова к отправке')
-      .filter((b) => isDateInRange(b.manufactureDate, reportDateFrom, reportDateTo))
       .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
-    [batches, reportDateFrom, reportDateTo],
+    [batches],
   );
 
   const reportBatches = useMemo(
     () => batches
       .filter((b) => b.status === 'Отправлено на сборку')
-      .filter((b) => isDateInRange(b.manufactureDate, reportDateFrom, reportDateTo))
-      .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
-    [batches, reportDateFrom, reportDateTo],
+      .sort((a, b) => dateToMs(getArchiveDate(b)) - dateToMs(getArchiveDate(a))),
+    [batches],
   );
 
-  const recentArchive = useMemo(() => {
-    const monthAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    return reportBatches.filter((b) => dateToMs(b.manufactureDate) >= monthAgoMs);
-  }, [reportBatches]);
-
   const folderedArchive = useMemo(() => {
-    const monthAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    const older = reportBatches.filter((b) => dateToMs(b.manufactureDate) < monthAgoMs);
     const grouped: Record<string, Batch[]> = {};
-    older.forEach((b) => {
-      const folder = monthFolderName(b.manufactureDate);
+    reportBatches.forEach((b) => {
+      const folder = formatMonthFolderLabel(getArchiveDate(b));
       if (!grouped[folder]) grouped[folder] = [];
       grouped[folder].push(b);
     });
     return grouped;
   }, [reportBatches]);
 
+
+
+  const defectBatchesByProduct = useMemo(() => {
+    const grouped: Record<string, Batch[]> = {};
+    batches
+      .filter((batch) => {
+        const inspection = inspections.find((item) => item.batchId === batch.id);
+        return !!inspection && inspection.defects.length > 0;
+      })
+      .forEach((batch) => {
+        if (!grouped[batch.productName]) grouped[batch.productName] = [];
+        grouped[batch.productName].push(batch);
+      });
+    return grouped;
+  }, [batches, inspections]);
 
   const filteredBatchesForCurrentUser = useMemo(() => {
     if (!currentUser) return visibleBatchesPage;
@@ -692,6 +711,7 @@ export default function App() {
       inspectorId: item.inspector_id != null ? String(item.inspector_id) : undefined,
       inspectorName: item.inspector_name || undefined,
       acceptedByUserId: item.accepted_by_user_id != null ? String(item.accepted_by_user_id) : undefined,
+      sentToAssemblyAt: item.sent_to_assembly_at ? String(item.sent_to_assembly_at).slice(0, 10) : undefined,
     })));
 
     setShifts((shiftsData as ApiShiftRow[]).map((item) => ({
@@ -811,6 +831,17 @@ export default function App() {
     setLogin('');
     setPassword('');
     setCameraOpen(false);
+  };
+
+  const chooseProductName = () => {
+    Alert.alert(
+      'Выберите изделие',
+      '',
+      PRODUCT_OPTIONS.map((option) => ({
+        text: option,
+        onPress: () => setNewBatch((prev) => ({ ...prev, productName: option })),
+      })).concat([{ text: 'Отмена', style: 'cancel' as const }]),
+    );
   };
 
   const resetBatchForm = () => {
@@ -1467,6 +1498,7 @@ export default function App() {
         <Text style={styles.text}>Количество: {batch.quantity}</Text>
         <Text style={styles.text}>Дата: {formatDisplayDate(batch.manufactureDate)}</Text>
         <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
+        {mode === 'report' && batch.sentToAssemblyAt && <Text style={styles.text}>Отправлена: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>}
         {inspection && renderInspectionPreview(inspection)}
 
         {mode === 'report' && isExpandedReportCard && inspection && (
@@ -1627,7 +1659,7 @@ export default function App() {
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
             <Pressable style={styles.iconButton} onPress={handleLogout}>
-              <Text style={styles.iconButtonText}>↩</Text>
+              <Text style={styles.iconButtonText}>⎋</Text>
             </Pressable>
           </View>
 
@@ -1636,6 +1668,7 @@ export default function App() {
             <TabButton title="Партии" active={screen === 'batches'} onPress={() => setScreen('batches')} />
             {showInspectionTab && <TabButton title="Контроль" active={screen === 'inspection'} onPress={() => setScreen('inspection')} />}
             <TabButton title="Отчёты" active={screen === 'report'} onPress={() => setScreen('report')} />
+            <TabButton title="Брак" active={screen === 'defects'} onPress={() => setScreen('defects')} />
             {showScheduleTab && <TabButton title="Смены" active={screen === 'schedule'} onPress={() => setScreen('schedule')} />}
             {currentUser.role === 'Администратор' && <TabButton title="Админ" active={screen === 'admin'} onPress={() => setScreen('admin')} />}
           </View>
@@ -1659,7 +1692,9 @@ export default function App() {
                 <View style={styles.card}>
                   <Text style={styles.cardTitle}>{editingBatchId ? 'Редактирование партии' : 'Создание партии'}</Text>
                   <Label text="Наименование изделия" />
-                  <TextInput style={styles.input} value={newBatch.productName} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, productName: value }))} />
+                  <Pressable style={styles.datePickerButton} onPress={chooseProductName}>
+                    <Text style={styles.datePickerButtonText}>{newBatch.productName || 'Выбрать изделие'}</Text>
+                  </Pressable>
                   <Label text="Количество" />
                   <TextInput style={styles.input} keyboardType="numeric" value={newBatch.quantity} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, quantity: value }))} />
                   <Label text="Дата изготовления" />
@@ -1703,7 +1738,13 @@ export default function App() {
 
           {screen === 'inspection' && (
             <View>
-              <SectionTitle title="Контроль" />
+              <View style={styles.rowBetween}>
+                <Pressable style={styles.smallCloseButton} onPress={() => { setSelectedBatchId(null); setScreen('batches'); setIsControlEditMode(false); }}>
+                  <Text style={styles.smallCloseButtonText}>×</Text>
+                </Pressable>
+                <SectionTitle title="Контроль" />
+                <View style={{ width: 44 }} />
+              </View>
               {currentUser.role === 'Контролер' && !currentUserOnControlShift && (
                 <View style={[styles.card, styles.warningCard]}>
                   <Text style={styles.warningText}>Контролер не назначен на смену сегодня и не может принимать новые партии.</Text>
@@ -1831,16 +1872,6 @@ export default function App() {
           {screen === 'report' && (
             <View>
               <SectionTitle title="Отчёты" />
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Фильтр по датам</Text>
-                <Label text="Дата от" />
-                <TextInput style={styles.input} value={reportDateFrom} onChangeText={setReportDateFrom} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} />
-                <Label text="Дата до" />
-                <TextInput style={styles.input} value={reportDateTo} onChangeText={setReportDateTo} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} />
-                <Pressable style={styles.secondaryButton} onPress={() => { setReportDateFrom(''); setReportDateTo(''); setReportSelectedBatchId(null); }}>
-                  <Text style={styles.secondaryButtonText}>Сбросить фильтр</Text>
-                </Pressable>
-              </View>
 
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Готовы к отправке</Text>
@@ -1852,14 +1883,9 @@ export default function App() {
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Отчёты за последний месяц</Text>
-                {recentArchive.length === 0 ? <Text style={styles.text}>Нет отчётов за последний месяц.</Text> : recentArchive.map((batch) => renderBatchCard(batch, 'report'))}
-              </View>
-
-              <View style={styles.card}>
                 <Text style={styles.cardTitle}>Архив по месяцам</Text>
                 {Object.keys(folderedArchive).length === 0 ? (
-                  <Text style={styles.text}>Архивных отчётов старше месяца нет.</Text>
+                  <Text style={styles.text}>Архивных партий пока нет.</Text>
                 ) : (
                   Object.entries(folderedArchive).map(([folder, items]) => (
                     <View key={folder} style={styles.cardSoft}>
@@ -1869,6 +1895,52 @@ export default function App() {
                   ))
                 )}
               </View>
+            </View>
+          )}
+
+          {screen === 'defects' && (
+            <View>
+              <SectionTitle title="Брак" />
+              {Object.keys(defectBatchesByProduct).length === 0 ? (
+                <View style={styles.card}><Text style={styles.text}>Записей о браке пока нет.</Text></View>
+              ) : (
+                Object.entries(defectBatchesByProduct).map(([productName, items]) => (
+                  <View key={productName} style={styles.card}>
+                    <Text style={styles.cardTitle}>{productName}</Text>
+                    {items.map((batch) => {
+                      const inspection = inspections.find((item) => item.batchId === batch.id);
+                      const firstDefect = inspection?.defects?.[0];
+                      const isExpanded = defectExpandedBatchId === batch.id;
+                      return (
+                        <Pressable key={batch.id} style={styles.historyItem} onPress={() => setDefectExpandedBatchId((prev) => (prev === batch.id ? null : batch.id))}>
+                          <Text style={[styles.text, styles.linkText]}>{batch.productName}</Text>
+                          <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection?.date)}</Text>
+                          {!!firstDefect?.imageUri && <Image source={{ uri: firstDefect.imageUri }} style={styles.imagePreviewSmall} />}
+                          {isExpanded && inspection && (
+                            <View style={styles.cardSoft}>
+                              <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
+                              <Text style={styles.text}>Дата создания: {formatDisplayDate(batch.manufactureDate)}</Text>
+                              <Text style={styles.text}>Дата проверки: {formatDisplayDate(inspection.date)}</Text>
+                              <Text style={styles.text}>Дата отправки: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>
+                              <Text style={styles.text}>Работник: {batch.workerName}</Text>
+                              <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
+                              <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
+                              <Text style={styles.text}>Комментарий: {inspection.comment || '—'}</Text>
+                              {inspection.defects.map((defect) => (
+                                <View key={defect.id} style={styles.historyItem}>
+                                  <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
+                                  <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
+                                  {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
+                                </View>
+                              ))}
+                            </View>
+                          )}
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                ))
+              )}
             </View>
           )}
 
@@ -2051,6 +2123,8 @@ const styles = StyleSheet.create({
   secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
   iconButton: { width: 56, height: 56, backgroundColor: COLORS.soft, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   iconButtonText: { color: COLORS.text, fontSize: 24, fontWeight: '800' },
+  smallCloseButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  smallCloseButtonText: { color: COLORS.text, fontSize: 28, fontWeight: '700', lineHeight: 28 },
   dangerButton: { backgroundColor: '#7f1d1d', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   dangerButtonText: { color: '#fee2e2', fontWeight: '700' },
   sectionTitle: { color: COLORS.text, fontSize: 22, fontWeight: '700', marginBottom: 12 },

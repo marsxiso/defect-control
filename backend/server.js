@@ -23,6 +23,7 @@ async function runSchema() {
   const schemaPath = path.join(__dirname, 'schema.sql');
   const sql = fs.readFileSync(schemaPath, 'utf8');
   await pool.query(sql);
+  await pool.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS sent_to_assembly_at TIMESTAMPTZ");
 }
 
 function toInt(value) {
@@ -260,7 +261,8 @@ app.get('/api/batches', async (req, res) => {
         i.accepted_count,
         i.rejected_count,
         i.comment AS inspection_comment,
-        b.accepted_by_user_id
+        b.accepted_by_user_id,
+        b.sent_to_assembly_at
       FROM batches b
       LEFT JOIN workers w ON b.assigned_worker_id = w.id
       LEFT JOIN users creator ON b.created_by = creator.id
@@ -444,7 +446,7 @@ app.post('/api/batches/:id/send-to-assembly', async (req, res) => {
       return res.status(400).json({ ok: false, message: 'На сборку можно отправить только партию со статусом «Готова к отправке»' });
     }
     const result = await pool.query(
-      `UPDATE batches SET status = 'Отправлено на сборку' WHERE id = $1 RETURNING *`,
+      `UPDATE batches SET status = 'Отправлено на сборку', sent_to_assembly_at = NOW() WHERE id = $1 RETURNING *`,
       [batchId]
     );
     res.json(result.rows[0]);
