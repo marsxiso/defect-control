@@ -12,7 +12,7 @@ const app = express();
 const upload = multer({ dest: 'uploads/' });
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -24,9 +24,6 @@ async function runSchema() {
   const sql = fs.readFileSync(schemaPath, 'utf8');
   await pool.query(sql);
   await pool.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS sent_to_assembly_at TIMESTAMPTZ");
-  await pool.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS started_by_worker_id INTEGER");
-  await pool.query("ALTER TABLE workers ADD COLUMN IF NOT EXISTS login VARCHAR(255) UNIQUE");
-  await pool.query("ALTER TABLE workers ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)");
   await pool.query("ALTER TABLE inspection_defects ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'На рассмотрении'");
 }
 
@@ -105,38 +102,19 @@ app.post('/auth/login', async (req, res) => {
       [login, password]
     );
 
-    if (result.rows.length > 0) {
-      const user = result.rows[0];
-      return res.json({
-        ok: true,
-        token: 'ok',
-        user: {
-          id: user.id,
-          login: user.login,
-          full_name: user.full_name,
-          role: user.role,
-        },
-      });
-    }
-
-    const workerResult = await pool.query(
-      'SELECT * FROM workers WHERE login = $1 AND password_hash = $2',
-      [login, password]
-    );
-
-    if (workerResult.rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(401).json({ ok: false, message: 'Неверный логин или пароль' });
     }
 
-    const worker = workerResult.rows[0];
+    const user = result.rows[0];
     res.json({
       ok: true,
       token: 'ok',
       user: {
-        id: worker.id,
-        login: worker.login,
-        full_name: worker.full_name,
-        role: 'Рабочий',
+        id: user.id,
+        login: user.login,
+        full_name: user.full_name,
+        role: user.role,
       },
     });
   } catch (error) {
@@ -208,7 +186,7 @@ app.delete('/api/users/:id', async (req, res) => {
 
 app.get('/api/workers', async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, full_name, login FROM workers ORDER BY full_name');
+    const result = await pool.query('SELECT * FROM workers ORDER BY full_name');
     res.json(result.rows);
   } catch (error) {
     console.error('GET WORKERS ERROR:', error);
@@ -218,14 +196,17 @@ app.get('/api/workers', async (req, res) => {
 
 app.post('/api/workers', async (req, res) => {
   try {
-    const { full_name, login, password } = req.body;
+    const { full_name } = req.body;
     if (!full_name) {
       return res.status(400).json({ ok: false, message: 'full_name обязателен' });
     }
     const result = await pool.query(
-      'INSERT INTO workers (full_name, login, password_hash) VALUES ($1, $2, $3) RETURNING id, full_name, login',
-      [full_name.trim(), login ? String(login).trim() : null, password ? String(password).trim() : null]
+      'INSERT INTO workers (full_name) VALUES ($1) ON CONFLICT (full_name) DO NOTHING RETURNING *',
+      [full_name.trim()]
     );
+    if (!result.rows[0]) {
+      return res.status(400).json({ ok: false, message: 'Такой рабочий уже существует' });
+    }
     res.json(result.rows[0]);
   } catch (error) {
     console.error('CREATE WORKER ERROR:', error);
@@ -237,19 +218,14 @@ app.post('/api/workers', async (req, res) => {
 app.put('/api/workers/:id', async (req, res) => {
   try {
     const workerId = toInt(req.params.id);
-    const { full_name, login, password, editor_role } = req.body;
+    const { full_name, editor_role } = req.body;
     if (editor_role !== 'Администратор') {
       return res.status(403).json({ ok: false, message: 'Только администратор может редактировать рабочих' });
     }
     if (!full_name) {
       return res.status(400).json({ ok: false, message: 'full_name обязателен' });
     }
-    let result;
-    if (password && String(password).trim()) {
-      result = await pool.query('UPDATE workers SET full_name = $1, login = $2, password_hash = $3 WHERE id = $4 RETURNING id, full_name, login', [full_name.trim(), login ? String(login).trim() : null, String(password).trim(), workerId]);
-    } else {
-      result = await pool.query('UPDATE workers SET full_name = $1, login = $2 WHERE id = $3 RETURNING id, full_name, login', [full_name.trim(), login ? String(login).trim() : null, workerId]);
-    }
+    const result = await pool.query('UPDATE workers SET full_name = $1 WHERE id = $2 RETURNING *', [full_name.trim(), workerId]);
     if (!result.rows[0]) return res.status(404).json({ ok: false, message: 'Рабочий не найден' });
     res.json(result.rows[0]);
   } catch (error) {
@@ -288,13 +264,10 @@ app.get('/api/batches', async (req, res) => {
         i.rejected_count,
         i.comment AS inspection_comment,
         b.accepted_by_user_id,
-        b.started_by_worker_id,
-        shift.shift_type AS worker_shift_type,
         b.sent_to_assembly_at
       FROM batches b
       LEFT JOIN workers w ON b.assigned_worker_id = w.id
       LEFT JOIN users creator ON b.created_by = creator.id
-      LEFT JOIN shifts shift ON shift.worker_id = b.assigned_worker_id AND shift.shift_date = DATE(b.created_at)
       LEFT JOIN inspections i ON i.batch_id = b.id
       LEFT JOIN users inspector ON i.inspector_id = inspector.id
       ORDER BY b.id DESC
@@ -313,8 +286,8 @@ app.post('/api/batches', async (req, res) => {
       return res.status(400).json({ ok: false, message: 'Не все обязательные поля заполнены' });
     }
     const result = await pool.query(
-      `INSERT INTO batches (batch_number, product_name, quantity, created_by, assigned_worker_id, status)
-       VALUES ($1, $2, $3, $4, $5, 'Создана')
+      `INSERT INTO batches (batch_number, product_name, quantity, created_by, assigned_worker_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
       [batch_number, product_name.trim(), quantity || 0, created_by || null, assigned_worker_id]
     );
@@ -336,8 +309,8 @@ app.put('/api/batches/:id', async (req, res) => {
     if (String(batch.created_by || '') !== String(editorId || '')) {
       return res.status(403).json({ ok: false, message: 'Можно редактировать только свои партии' });
     }
-    if (batch.status !== 'Создана') {
-      return res.status(400).json({ ok: false, message: 'Редактировать можно только созданную партию' });
+    if (batch.status !== 'Готова к проверке') {
+      return res.status(400).json({ ok: false, message: 'Проверенную партию редактировать нельзя' });
     }
     const updated = await pool.query(
       `UPDATE batches
@@ -376,68 +349,6 @@ app.delete('/api/batches/:id', async (req, res) => {
   }
 });
 
-app.post('/api/batches/:id/worker-accept', async (req, res) => {
-  try {
-    const batchId = toInt(req.params.id);
-    const workerId = toInt(req.body.worker_id);
-    if (!batchId || !workerId) {
-      return res.status(400).json({ ok: false, message: 'batch_id и worker_id обязательны' });
-    }
-    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
-    const batch = batchResult.rows[0];
-    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    if (String(batch.assigned_worker_id || '') !== String(workerId)) {
-      return res.status(403).json({ ok: false, message: 'Рабочий может принимать только назначенные ему партии' });
-    }
-    if (batch.status !== 'Создана') {
-      return res.status(400).json({ ok: false, message: 'Принять в работу можно только созданную партию' });
-    }
-    const shiftResult = await pool.query("SELECT * FROM shifts WHERE worker_id = $1 AND shift_date = CURRENT_DATE LIMIT 1", [workerId]);
-    if (!shiftResult.rows[0]) {
-      return res.status(400).json({ ok: false, message: 'Рабочий не назначен на смену сегодня' });
-    }
-    const updated = await pool.query(
-      'UPDATE batches SET status = $1, started_by_worker_id = $2 WHERE id = $3 RETURNING *',
-      ['В процессе', workerId, batchId]
-    );
-    res.json(updated.rows[0]);
-  } catch (error) {
-    console.error('WORKER ACCEPT BATCH ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось принять партию в работу' });
-  }
-});
-
-app.post('/api/batches/:id/worker-complete', async (req, res) => {
-  try {
-    const batchId = toInt(req.params.id);
-    const workerId = toInt(req.body.worker_id);
-    if (!batchId || !workerId) {
-      return res.status(400).json({ ok: false, message: 'batch_id и worker_id обязательны' });
-    }
-    const batchResult = await pool.query('SELECT * FROM batches WHERE id = $1', [batchId]);
-    const batch = batchResult.rows[0];
-    if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
-    if (String(batch.assigned_worker_id || '') !== String(workerId) || String(batch.started_by_worker_id || '') !== String(workerId)) {
-      return res.status(403).json({ ok: false, message: 'Завершить может только назначенный рабочий, принявший партию' });
-    }
-    if (batch.status !== 'В процессе') {
-      return res.status(400).json({ ok: false, message: 'Завершить можно только партию в процессе' });
-    }
-    const shiftResult = await pool.query("SELECT * FROM shifts WHERE worker_id = $1 AND shift_date = CURRENT_DATE LIMIT 1", [workerId]);
-    if (!shiftResult.rows[0]) {
-      return res.status(400).json({ ok: false, message: 'Рабочий не назначен на смену сегодня' });
-    }
-    const updated = await pool.query(
-      "UPDATE batches SET status = 'Готова к проверке', created_at = NOW() WHERE id = $1 RETURNING *",
-      [batchId]
-    );
-    res.json(updated.rows[0]);
-  } catch (error) {
-    console.error('WORKER COMPLETE BATCH ERROR:', error);
-    res.status(500).json({ ok: false, message: 'Не удалось передать партию на контроль' });
-  }
-});
-
 app.post('/api/batches/:id/accept', async (req, res) => {
   try {
     const batchId = toInt(req.params.id);
@@ -450,7 +361,7 @@ app.post('/api/batches/:id/accept', async (req, res) => {
     const batch = batchResult.rows[0];
     if (!batch) return res.status(404).json({ ok: false, message: 'Партия не найдена' });
     if (batch.status !== 'Готова к проверке') {
-      return res.status(400).json({ ok: false, message: 'Принять можно только партию со статусом «Готова к проверке»' });
+      return res.status(400).json({ ok: false, message: 'Принять можно только партию, готовую к проверке' });
     }
     if (batch.accepted_by_user_id && String(batch.accepted_by_user_id) !== String(userId)) {
       return res.status(400).json({ ok: false, message: 'Партия уже принята другим сотрудником' });
@@ -846,6 +757,26 @@ app.put('/api/inspection-defects/:id/status', async (req, res) => {
   } catch (error) {
     console.error('UPDATE DEFECT STATUS ERROR:', error);
     res.status(500).json({ ok: false, message: 'Не удалось обновить статус брака' });
+  }
+});
+
+
+app.post('/api/upload-image', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, message: 'Файл не загружен' });
+    }
+
+    const mimeType = req.file.mimetype || 'image/jpeg';
+    const base64 = fs.readFileSync(req.file.path, { encoding: 'base64' });
+    const imageUri = `data:${mimeType};base64,${base64}`;
+
+    if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    res.json({ ok: true, image_uri: imageUri });
+  } catch (error) {
+    console.error('UPLOAD IMAGE ERROR:', error);
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    res.status(500).json({ ok: false, message: 'Не удалось загрузить изображение' });
   }
 });
 

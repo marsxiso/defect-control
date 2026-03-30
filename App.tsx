@@ -15,8 +15,8 @@ import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор' | 'Рабочий';
-type BatchStatus = 'Создана' | 'В процессе' | 'Готова к проверке' | 'Проверена' | 'Готова к отправке' | 'Отправлено на сборку';
+type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор';
+type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Готова к отправке' | 'Отправлено на сборку';
 type DefectClass =
   | 'Без дефекта'
   | 'Царапина'
@@ -36,9 +36,6 @@ type Batch = {
   quantity: number;
   manufactureDate: string;
   workerName: string;
-  assignedWorkerId?: string;
-  startedByWorkerId?: string;
-  workerShiftType?: string;
   status: BatchStatus;
   createdBy?: string;
   creatorName?: string;
@@ -82,7 +79,6 @@ type User = {
 type Worker = {
   id: string;
   name: string;
-  login?: string;
 };
 
 type ShiftEmployeeType = 'worker' | 'controller';
@@ -92,7 +88,6 @@ type Shift = {
   date: string;
   employeeName: string;
   employeeType: ShiftEmployeeType;
-  shiftType?: string;
   assigneeId: string;
   assignedBy?: string;
   roleLabel?: string;
@@ -132,7 +127,6 @@ type ApiUserRow = {
 type ApiWorkerRow = {
   id: number | string;
   full_name: string;
-  login?: string | null;
 };
 
 type ApiBatchRow = {
@@ -149,8 +143,6 @@ type ApiBatchRow = {
   inspector_id?: number | string | null;
   inspector_name?: string | null;
   accepted_by_user_id?: number | string | null;
-  started_by_worker_id?: number | string | null;
-  worker_shift_type?: string | null;
   sent_to_assembly_at?: string | null;
 };
 
@@ -236,8 +228,6 @@ function mapApiRoleToAppRole(role: string): Role {
     'Контролер': 'Контролер',
     'Контрольный мастер': 'Контрольный мастер',
     'Производственный мастер': 'Производственный мастер',
-    'Рабочий': 'Рабочий',
-    worker: 'Рабочий',
   };
   return roleMap[role] || 'Контролер';
 }
@@ -328,6 +318,40 @@ async function analyzeDefectViaApi(imageUri: string): Promise<{ defect: DefectCl
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+
+async function uploadDefectImageToApi(imageUri: string): Promise<string> {
+  const formData = new FormData();
+  const extensionMatch = imageUri.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
+  const extension = extensionMatch?.[1]?.toLowerCase() || 'jpg';
+  const mimeType = extension === 'png' ? 'image/png' : 'image/jpeg';
+
+  formData.append(
+    'file',
+    {
+      uri: imageUri,
+      name: `defect_upload_${Date.now()}.${extension}`,
+      type: mimeType,
+    } as any,
+  );
+
+  const response = await fetch(`${API_URL}/api/upload-image`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  const data = await readJson(response);
+  if (!response.ok || !data?.image_uri) {
+    throw new Error(data?.message || 'Не удалось загрузить изображение дефекта');
+  }
+
+  return data.image_uri as string;
+}
+
+function isLocalImageUri(value?: string) {
+  if (!value) return false;
+  return value.startsWith('file:') || value.startsWith('content:') || value.startsWith('ph://') || value.startsWith('assets-library://');
 }
 
 function formatDate(date: Date) {
@@ -425,11 +449,7 @@ function StatCard({ title, value }: { title: string; value: string }) {
 
 function StatusBadge({ status }: { status: BatchStatus }) {
   const backgroundColor =
-    status === 'Создана'
-      ? '#64748b'
-      : status === 'В процессе'
-      ? '#8b5cf6'
-      : status === 'Готова к проверке'
+    status === 'Готова к проверке'
       ? '#2563eb'
       : status === 'Проверена'
       ? '#15803d'
@@ -474,9 +494,6 @@ export default function App() {
   const [userForm, setUserForm] = useState({ name: '', login: '', password: '', role: 'Контролер' as Role });
   const [editingWorkerId, setEditingWorkerId] = useState<string | null>(null);
   const [workerFormName, setWorkerFormName] = useState('');
-  const [workerFormLogin, setWorkerFormLogin] = useState('');
-  const [workerFormPassword, setWorkerFormPassword] = useState('');
-  const [workerShiftType, setWorkerShiftType] = useState<'day' | 'night'>('day');
 
   const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
   const [showProductMenu, setShowProductMenu] = useState(false);
@@ -583,13 +600,11 @@ export default function App() {
     [inspections, reportSelectedBatchId],
   );
 
-  const currentMonthBatches = useMemo(() => batches.filter((b) => isCurrentMonth(b.manufactureDate)).filter((b) => currentUser?.role === 'Рабочий' ? b.assignedWorkerId === currentUser.id : true), [batches, currentUser]);
+  const currentMonthBatches = useMemo(() => batches.filter((b) => isCurrentMonth(b.manufactureDate)), [batches]);
 
   const stats = useMemo(
     () => ({
       total: currentMonthBatches.length,
-      created: currentMonthBatches.filter((b) => b.status === 'Создана').length,
-      inProcess: currentMonthBatches.filter((b) => b.status === 'В процессе').length,
       readyCheck: currentMonthBatches.filter((b) => b.status === 'Готова к проверке').length,
       checked: currentMonthBatches.filter((b) => b.status === 'Проверена').length,
       readyToSend: currentMonthBatches.filter((b) => b.status === 'Готова к отправке').length,
@@ -654,12 +669,9 @@ export default function App() {
 
   const filteredBatchesForCurrentUser = useMemo(() => {
     if (!currentUser) return visibleBatchesPage;
-    if (currentUser.role === 'Рабочий') {
-      return visibleBatchesPage.filter((b) => b.assignedWorkerId === currentUser.id);
-    }
     if (currentUser.role === 'Контролер' || currentUser.role === 'Контрольный мастер') {
       return visibleBatchesPage.filter(
-        (b) => b.status === 'Готова к проверке' || b.status === 'Проверена' || (!b.acceptedByUserId || b.acceptedByUserId === currentUser.id),
+        (b) => !b.acceptedByUserId || b.acceptedByUserId === currentUser.id,
       );
     }
     return visibleBatchesPage;
@@ -690,11 +702,6 @@ export default function App() {
     if (currentUser.role !== 'Контролер') return false;
     return controllersOnShiftToday.includes(currentUser.id);
   }, [controllersOnShiftToday, currentUser]);
-
-  const currentWorkerShiftToday = useMemo(() => {
-    if (!currentUser || currentUser.role !== 'Рабочий') return null;
-    return shifts.find((shift) => shift.employeeType === 'worker' && shift.assigneeId === currentUser.id && shift.date === todayStr()) || null;
-  }, [currentUser, shifts]);
 
   const batchCanBeEditedByCurrentUser = useMemo(() => {
     if (!currentUser || !selectedBatch) return false;
@@ -767,7 +774,7 @@ export default function App() {
       role: mapApiRoleToAppRole(item.role),
     })));
 
-    setWorkers((workersData as ApiWorkerRow[]).map((item) => ({ id: String(item.id), name: item.full_name, login: item.login || undefined })));
+    setWorkers((workersData as ApiWorkerRow[]).map((item) => ({ id: String(item.id), name: item.full_name })));
 
     setBatches((batchesData as ApiBatchRow[]).map((item) => ({
       id: String(item.id),
@@ -776,10 +783,7 @@ export default function App() {
       quantity: Number(item.quantity || 0),
       manufactureDate: String(item.created_at || todayStr()).slice(0, 10),
       workerName: item.full_name || '',
-      assignedWorkerId: item.assigned_worker_id != null ? String(item.assigned_worker_id) : undefined,
-      startedByWorkerId: item.started_by_worker_id != null ? String(item.started_by_worker_id) : undefined,
-      workerShiftType: item.worker_shift_type || undefined,
-      status: (item.status as BatchStatus) || 'Создана',
+      status: (item.status as BatchStatus) || 'Готова к проверке',
       createdBy: item.created_by != null ? String(item.created_by) : undefined,
       creatorName: item.creator_name || undefined,
       inspectorId: item.inspector_id != null ? String(item.inspector_id) : undefined,
@@ -794,7 +798,6 @@ export default function App() {
       employeeName: item.full_name,
       employeeType: item.employee_type,
       assigneeId: item.employee_type === 'worker' ? String(item.worker_id) : String(item.user_id),
-      shiftType: item.shift_type,
       assignedBy: item.assigned_by != null ? String(item.assigned_by) : undefined,
       roleLabel: item.role_label || (item.employee_type === 'worker' ? 'Рабочий' : 'Контролер'),
     })));
@@ -1185,29 +1188,40 @@ export default function App() {
       Alert.alert('Недоступно', 'Контролер может принимать партии только если он на смене сегодня');
       return;
     }
-    const acceptedCount = Number(inspectionForm.acceptedCount || '0');
-    const rejectedTotal = detectedDefects.reduce((sum, item) => sum + item.affectedCount, 0);
-    const payload = {
-      batch_id: Number(selectedBatch.id),
-      inspector_id: Number(currentUser.id),
-      inspector_name: currentUser.name,
-      editor_id: Number(currentUser.id),
-      visual_conclusion: inspectionForm.visualConclusion.trim(),
-      geometry_conclusion: inspectionForm.geometryConclusion.trim(),
-      accepted_count: acceptedCount,
-      rejected_count: rejectedTotal,
-      comment: '',
-      defects: detectedDefects.map((item) => ({
-        defect_class: item.defectClass,
-        confidence: item.confidence,
-        affected_count: item.affectedCount,
-        comment: item.comment,
-        review_status: item.reviewStatus,
-        image_uri: item.imageUri,
-      })),
-    };
 
     try {
+      const defectsWithSharedImages = await Promise.all(
+        detectedDefects.map(async (item) => {
+          if (!isLocalImageUri(item.imageUri)) {
+            return item;
+          }
+          const uploadedImageUri = await uploadDefectImageToApi(item.imageUri!);
+          return { ...item, imageUri: uploadedImageUri };
+        }),
+      );
+
+      const acceptedCount = Number(inspectionForm.acceptedCount || '0');
+      const rejectedTotal = defectsWithSharedImages.reduce((sum, item) => sum + item.affectedCount, 0);
+      const payload = {
+        batch_id: Number(selectedBatch.id),
+        inspector_id: Number(currentUser.id),
+        inspector_name: currentUser.name,
+        editor_id: Number(currentUser.id),
+        visual_conclusion: inspectionForm.visualConclusion.trim(),
+        geometry_conclusion: inspectionForm.geometryConclusion.trim(),
+        accepted_count: acceptedCount,
+        rejected_count: rejectedTotal,
+        comment: '',
+        defects: defectsWithSharedImages.map((item) => ({
+          defect_class: item.defectClass,
+          confidence: item.confidence,
+          affected_count: item.affectedCount,
+          comment: item.comment,
+          review_status: item.reviewStatus,
+          image_uri: item.imageUri,
+        })),
+      };
+
       const url = selectedInspection ? `${API_URL}/api/inspections/${selectedInspection.id}` : `${API_URL}/api/inspections`;
       const method = selectedInspection ? 'PUT' : 'POST';
       const response = await fetch(url, {
@@ -1220,53 +1234,15 @@ export default function App() {
         Alert.alert('Ошибка', data?.message || 'Не удалось сохранить контроль');
         return;
       }
+      setDetectedDefects(defectsWithSharedImages);
       await syncAllFromServer();
       setSelectedBatchId(null);
       setIsControlEditMode(false);
       setScreen('batches');
       Alert.alert('Готово', selectedInspection ? 'Контроль обновлен' : 'Контроль сохранен');
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось сохранить контроль');
-    }
-  };
-
-  const acceptBatchForWork = async (batch: Batch) => {
-    if (!currentUser) return;
-    try {
-      const response = await fetch(`${API_URL}/api/batches/${batch.id}/worker-accept`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ worker_id: Number(currentUser.id) }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось принять партию в работу');
-        return;
-      }
-      await syncAllFromServer();
-      Alert.alert('Готово', 'Партия принята в работу');
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось принять партию в работу');
-    }
-  };
-
-  const completeBatchWork = async (batch: Batch) => {
-    if (!currentUser) return;
-    try {
-      const response = await fetch(`${API_URL}/api/batches/${batch.id}/worker-complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ worker_id: Number(currentUser.id) }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось передать партию на контроль');
-        return;
-      }
-      await syncAllFromServer();
-      Alert.alert('Готово', 'Партия передана на контроль');
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось передать партию на контроль');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось сохранить контроль';
+      Alert.alert('Ошибка', message);
     }
   };
 
@@ -1360,7 +1336,7 @@ export default function App() {
     const response = await fetch(`${API_URL}/api/workers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ full_name: name, login: workerFormLogin.trim() || null, password: workerFormPassword.trim() || null }),
+      body: JSON.stringify({ full_name: name }),
     });
     const data = await readJson(response);
     if (!response.ok) {
@@ -1369,8 +1345,6 @@ export default function App() {
     }
     await syncAllFromServer();
     setNewWorkerName('');
-    setWorkerFormLogin('');
-    setWorkerFormPassword('');
     Alert.alert('Готово', 'Рабочий добавлен');
   };
 
@@ -1440,8 +1414,6 @@ export default function App() {
   const startEditWorker = (worker: Worker) => {
     setEditingWorkerId(worker.id);
     setWorkerFormName(worker.name);
-    setWorkerFormLogin(worker.login || '');
-    setWorkerFormPassword('');
     setScreen('admin');
   };
 
@@ -1451,7 +1423,7 @@ export default function App() {
       const response = await fetch(`${API_URL}/api/workers/${editingWorkerId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ full_name: workerFormName.trim(), login: workerFormLogin.trim() || null, password: workerFormPassword.trim() || null, editor_role: currentUser.role }),
+        body: JSON.stringify({ full_name: workerFormName.trim(), editor_role: currentUser.role }),
       });
       const data = await readJson(response);
       if (!response.ok) {
@@ -1461,8 +1433,6 @@ export default function App() {
       await syncAllFromServer();
       setEditingWorkerId(null);
       setWorkerFormName('');
-      setWorkerFormLogin('');
-      setWorkerFormPassword('');
       Alert.alert('Готово', 'Рабочий обновлен');
     } catch {
       Alert.alert('Ошибка', 'Не удалось обновить рабочего');
@@ -1539,7 +1509,7 @@ export default function App() {
       }
 
       const body = selectedScheduleEmployeeType === 'worker'
-        ? { worker_id: Number((selectedEmployee as Worker).id), shift_date: shiftDate, shift_type: workerShiftType, assigned_by: Number(currentUser.id), employee_type: 'worker' }
+        ? { worker_id: Number((selectedEmployee as Worker).id), shift_date: shiftDate, shift_type: 'day', assigned_by: Number(currentUser.id), employee_type: 'worker' }
         : { user_id: Number((selectedEmployee as User).id), shift_date: shiftDate, shift_type: 'day', assigned_by: Number(currentUser.id), employee_type: 'controller' };
 
       const response = await fetch(`${API_URL}/api/shifts`, {
@@ -1617,12 +1587,10 @@ export default function App() {
   const renderBatchCard = (batch: Batch, mode: 'list' | 'report' = 'list') => {
     const inspection = inspections.find((item) => item.batchId === batch.id);
     const isExpandedReportCard = mode === 'report' && reportSelectedBatchId === batch.id;
-    const canEditBatch = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Создана';
+    const canEditBatch = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к проверке';
     const canMarkReadyToSend = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
     const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к отправке';
     const canDeleteAnyBatch = currentUser?.role === 'Администратор';
-    const canWorkerAcceptBatch = currentUser?.role === 'Рабочий' && batch.assignedWorkerId === currentUser.id && batch.status === 'Создана' && !!currentWorkerShiftToday;
-    const canWorkerCompleteBatch = currentUser?.role === 'Рабочий' && batch.assignedWorkerId === currentUser.id && batch.startedByWorkerId === currentUser.id && batch.status === 'В процессе';
     const canAcceptBatch =
       mode === 'list' &&
       (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер') &&
@@ -1667,7 +1635,6 @@ export default function App() {
           <>
             <Text style={styles.text}>Количество: {batch.quantity}</Text>
             <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
-            {!!batch.workerShiftType && <Text style={styles.text}>Смена: {batch.workerShiftType === 'night' ? 'Ночная' : 'Дневная'}</Text>}
             {mode === 'report' && batch.sentToAssemblyAt && isExpandedReportCard && <Text style={styles.text}>Отправлена: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>}
             {inspection && (mode !== 'report' || isExpandedReportCard || batch.status === 'Готова к отправке') && renderInspectionPreview(inspection)}
           </>
@@ -1697,18 +1664,6 @@ export default function App() {
               ))
             )}
           </View>
-        )}
-
-        {mode === 'list' && canWorkerAcceptBatch && (
-          <Pressable style={styles.primaryButton} onPress={() => acceptBatchForWork(batch)}>
-            <Text style={styles.primaryButtonText}>Принять</Text>
-          </Pressable>
-        )}
-
-        {mode === 'list' && canWorkerCompleteBatch && (
-          <Pressable style={styles.primaryButton} onPress={() => completeBatchWork(batch)}>
-            <Text style={styles.primaryButtonText}>Готово</Text>
-          </Pressable>
         )}
 
         {mode === 'list' && canAcceptBatch && (
@@ -1862,8 +1817,6 @@ export default function App() {
               <SectionTitle title="Сводка производства" />
               <View style={styles.grid2}>
                 <StatCard title="Партий за месяц" value={String(stats.total)} />
-                <StatCard title="Созданы" value={String(stats.created)} />
-                <StatCard title="В процессе" value={String(stats.inProcess)} />
                 <StatCard title="Готовы к проверке" value={String(stats.readyCheck)} />
                 <StatCard title="Проверены" value={String(stats.checked)} />
                 <StatCard title="Готовы к отправке" value={String(stats.readyToSend)} />
@@ -1899,7 +1852,7 @@ export default function App() {
                   )}
                   <Label text="Количество" />
                   <TextInput style={styles.input} keyboardType="numeric" value={newBatch.quantity} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, quantity: value }))} />
-                  <Label text="Дата смены рабочего" />
+                  <Label text="Дата изготовления" />
                   <TextInput style={styles.input} value={newBatch.manufactureDate} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, manufactureDate: value }))} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} />
                   <Label text="Рабочий на смене" />
                   <View style={styles.roleRow}>
@@ -1921,12 +1874,6 @@ export default function App() {
                       <Text style={styles.secondaryButtonText}>Отменить редактирование</Text>
                     </Pressable>
                   )}
-                </View>
-              )}
-
-              {currentUser.role === 'Рабочий' && !currentWorkerShiftToday && (
-                <View style={[styles.card, styles.warningCard]}>
-                  <Text style={styles.warningText}>Вы не назначены на смену на сегодня, поэтому не можете принять партию в работу.</Text>
                 </View>
               )}
 
@@ -1978,12 +1925,6 @@ export default function App() {
                   <Text style={styles.smallCloseButtonText}>×</Text>
                 </Pressable>
               </View>
-              {currentUser.role === 'Рабочий' && !currentWorkerShiftToday && (
-                <View style={[styles.card, styles.warningCard]}>
-                  <Text style={styles.warningText}>Вы не назначены на смену на сегодня, поэтому не можете принять партию в работу.</Text>
-                </View>
-              )}
-
               {currentUser.role === 'Контролер' && !currentUserOnControlShift && (
                 <View style={[styles.card, styles.warningCard]}>
                   <Text style={styles.warningText}>Контролер не назначен на смену сегодня и не может принимать новые партии.</Text>
@@ -2260,19 +2201,6 @@ export default function App() {
                 {showShiftDatePicker && (
                   <DateTimePicker value={new Date(shiftDate)} mode="date" display="default" onChange={onChangeShiftDate} />
                 )}
-                {selectedScheduleEmployeeType === 'worker' && (
-                  <>
-                    <Label text="Тип смены" />
-                    <View style={styles.roleRow}>
-                      <Pressable style={[styles.roleButton, workerShiftType === 'day' && styles.roleButtonActive]} onPress={() => setWorkerShiftType('day')}>
-                        <Text style={[styles.roleButtonText, workerShiftType === 'day' && styles.roleButtonTextActive]}>Дневная</Text>
-                      </Pressable>
-                      <Pressable style={[styles.roleButton, workerShiftType === 'night' && styles.roleButtonActive]} onPress={() => setWorkerShiftType('night')}>
-                        <Text style={[styles.roleButtonText, workerShiftType === 'night' && styles.roleButtonTextActive]}>Ночная</Text>
-                      </Pressable>
-                    </View>
-                  </>
-                )}
                 <Label text={selectedScheduleEmployeeType === 'worker' ? 'Рабочий' : 'Контролер'} />
                 <View style={styles.roleRow}>
                   {scheduleCandidates.map((employee) => (
@@ -2300,7 +2228,7 @@ export default function App() {
                       <View key={shift.id} style={styles.historyItem}>
                         <Text style={styles.text}><Text style={styles.textBold}>{formatDisplayDate(shift.date)}</Text></Text>
                         <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
-                        <Text style={styles.text}>Тип: {shift.roleLabel || (shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер')}{shift.employeeType === 'worker' ? ` (${shift.shiftType === 'night' ? 'Ночная' : 'Дневная'})` : ''}</Text>
+                        <Text style={styles.text}>Тип: {shift.roleLabel || (shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер')}</Text>
                         {(currentUser.role === 'Администратор' || shift.assignedBy === currentUser.id) && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
                           <View style={styles.actionsWrap}>
                             <Pressable style={styles.secondaryButton} onPress={() => editShift(shift)}><Text style={styles.secondaryButtonText}>Редактировать</Text></Pressable>
@@ -2364,17 +2292,13 @@ export default function App() {
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Рабочие</Text>
                 <View style={styles.cardSoft}>
-                  <Label text={editingWorkerId ? 'Имя рабочего' : 'Новый рабочий'} />
+                  <Label text={editingWorkerId ? 'Редактирование рабочего' : 'Новый рабочий'} />
                   <TextInput style={styles.input} value={editingWorkerId ? workerFormName : newWorkerName} onChangeText={editingWorkerId ? setWorkerFormName : setNewWorkerName} />
-                  <Label text="Логин рабочего" />
-                  <TextInput style={styles.input} value={workerFormLogin} onChangeText={setWorkerFormLogin} />
-                  <Label text="Пароль рабочего" />
-                  <TextInput style={styles.input} value={workerFormPassword} onChangeText={setWorkerFormPassword} secureTextEntry placeholder="Оставьте пустым, чтобы не менять" placeholderTextColor={COLORS.muted} />
                   <Pressable style={styles.primaryButton} onPress={editingWorkerId ? saveWorker : () => addWorker()}>
                     <Text style={styles.primaryButtonText}>{editingWorkerId ? 'Сохранить рабочего' : 'Добавить рабочего'}</Text>
                   </Pressable>
                   {editingWorkerId && (
-                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingWorkerId(null); setWorkerFormName(''); setWorkerFormLogin(''); setWorkerFormPassword(''); }}>
+                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingWorkerId(null); setWorkerFormName(''); }}>
                       <Text style={styles.secondaryButtonText}>Отмена</Text>
                     </Pressable>
                   )}
@@ -2382,7 +2306,6 @@ export default function App() {
                 {workers.map((worker) => (
                   <View key={worker.id} style={styles.historyItem}>
                     <Text style={styles.text}>{worker.name}</Text>
-                    <Text style={styles.text}>Логин: {worker.login || '—'}</Text>
                     <View style={styles.actionsWrap}>
                       <Pressable style={styles.secondaryButton} onPress={() => startEditWorker(worker)}>
                         <Text style={styles.secondaryButtonText}>Редактировать</Text>
