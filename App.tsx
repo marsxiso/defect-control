@@ -1181,6 +1181,125 @@ export default function App() {
     Alert.alert('Готово', 'Рабочий добавлен');
   };
 
+
+  const startEditUser = (user: User) => {
+    setEditingUserId(user.id);
+    setUserForm({ name: user.name, login: user.login, password: '', role: user.role });
+    setScreen('admin');
+  };
+
+  const saveUser = async () => {
+    if (!currentUser || !editingUserId) return;
+    try {
+      const response = await fetch(`${API_URL}/api/users/${editingUserId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          full_name: userForm.name.trim(),
+          login: userForm.login.trim(),
+          password: userForm.password,
+          role: userForm.role,
+          editor_role: currentUser.role,
+        }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось обновить пользователя');
+        return;
+      }
+      await syncAllFromServer();
+      setEditingUserId(null);
+      setUserForm({ name: '', login: '', password: '', role: 'Контролер' });
+      Alert.alert('Готово', 'Пользователь обновлен');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось обновить пользователя');
+    }
+  };
+
+  const deleteUser = (user: User) => {
+    if (!currentUser) return;
+    Alert.alert('Удаление пользователя', `Удалить пользователя ${user.name}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/users/${user.id}`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ editor_role: currentUser.role }),
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить пользователя');
+              return;
+            }
+            await syncAllFromServer();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить пользователя');
+          }
+        },
+      },
+    ]);
+  };
+
+  const startEditWorker = (worker: Worker) => {
+    setEditingWorkerId(worker.id);
+    setWorkerFormName(worker.name);
+    setScreen('admin');
+  };
+
+  const saveWorker = async () => {
+    if (!currentUser || !editingWorkerId) return;
+    try {
+      const response = await fetch(`${API_URL}/api/workers/${editingWorkerId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ full_name: workerFormName.trim(), editor_role: currentUser.role }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        Alert.alert('Ошибка', data?.message || 'Не удалось обновить рабочего');
+        return;
+      }
+      await syncAllFromServer();
+      setEditingWorkerId(null);
+      setWorkerFormName('');
+      Alert.alert('Готово', 'Рабочий обновлен');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось обновить рабочего');
+    }
+  };
+
+  const deleteWorker = (worker: Worker) => {
+    if (!currentUser) return;
+    Alert.alert('Удаление рабочего', `Удалить рабочего ${worker.name}?`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const response = await fetch(`${API_URL}/api/workers/${worker.id}`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ editor_role: currentUser.role }),
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+              Alert.alert('Ошибка', data?.message || 'Не удалось удалить рабочего');
+              return;
+            }
+            await syncAllFromServer();
+          } catch {
+            Alert.alert('Ошибка', 'Не удалось удалить рабочего');
+          }
+        },
+      },
+    ]);
+  };
+
   const selectedScheduleEmployeeType: ShiftEmployeeType =
     currentUser?.role === 'Контрольный мастер'
       ? 'controller'
@@ -1316,13 +1435,19 @@ export default function App() {
       mode === 'list' &&
       !!currentUser &&
       batch.acceptedByUserId === currentUser.id &&
-      batch.status !== 'Готова к отправке' &&
-      batch.status !== 'Отправлено на сборку';
+      batch.status === 'Готова к проверке';
+
+    const canEditCheckedInspection =
+      mode === 'list' &&
+      !!currentUser &&
+      !!inspection &&
+      inspection.inspectorId === currentUser.id &&
+      batch.status === 'Проверена';
 
     const onOpenCard = () => {
       if (mode === 'report') {
         setReportSelectedBatchId((prev) => (prev === batch.id ? null : batch.id));
-      } else if (canGoToInspection) {
+      } else if (canGoToInspection || canEditCheckedInspection) {
         goToInspection(batch);
       } else {
         setSelectedBatchId(batch.id);
@@ -1377,16 +1502,15 @@ export default function App() {
         )}
 
         {mode === 'list' && canGoToInspection && (
-          <>
-            <Pressable style={styles.primaryButton} onPress={() => goToInspection(batch)}>
-              <Text style={styles.primaryButtonText}>Перейти к контролю</Text>
-            </Pressable>
-            {!inspection && (
-              <Pressable style={styles.secondaryButton} onPress={() => cancelAcceptedBatch(batch)}>
-                <Text style={styles.secondaryButtonText}>Отменить контроль</Text>
-              </Pressable>
-            )}
-          </>
+          <Pressable style={styles.primaryButton} onPress={() => goToInspection(batch)}>
+            <Text style={styles.primaryButtonText}>Перейти к контролю</Text>
+          </Pressable>
+        )}
+
+        {mode === 'list' && canEditCheckedInspection && (
+          <Pressable style={styles.secondaryButton} onPress={() => goToInspection(batch)}>
+            <Text style={styles.secondaryButtonText}>Изменить</Text>
+          </Pressable>
         )}
 
         {mode === 'list' && canEditBatch && (
@@ -1447,8 +1571,7 @@ export default function App() {
 
   const showInspectionTab =
     currentUser?.role === 'Контролер' ||
-    currentUser?.role === 'Контрольный мастер' ||
-    currentUser?.role === 'Администратор';
+    currentUser?.role === 'Контрольный мастер';
 
   const showScheduleTab =
     currentUser?.role === 'Производственный мастер' ||
@@ -1504,7 +1627,7 @@ export default function App() {
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
             <Pressable style={styles.iconButton} onPress={handleLogout}>
-              <Text style={styles.iconButtonText}>⇦</Text>
+              <Text style={styles.iconButtonText}>↩</Text>
             </Pressable>
           </View>
 
@@ -1597,6 +1720,12 @@ export default function App() {
                     <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
                   </View>
+
+                  {canCancelAcceptedBatch && (
+                    <Pressable style={styles.secondaryButton} onPress={() => cancelAcceptedBatch(selectedBatch)}>
+                      <Text style={styles.secondaryButtonText}>Отменить контроль</Text>
+                    </Pressable>
+                  )}
 
                   {selectedBatch.status === 'Проверена' && selectedInspection && selectedInspection.inspectorId !== currentUser.id && (
                     <View style={[styles.card, styles.warningCard]}>
@@ -1798,7 +1927,7 @@ export default function App() {
                         <Text style={styles.text}><Text style={styles.textBold}>{formatDisplayDate(shift.date)}</Text></Text>
                         <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
                         <Text style={styles.text}>Тип: {shift.roleLabel || (shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер')}</Text>
-                        {shift.assignedBy === currentUser.id && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
+                        {(currentUser.role === 'Администратор' || shift.assignedBy === currentUser.id) && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
                           <View style={styles.actionsWrap}>
                             <Pressable style={styles.secondaryButton} onPress={() => editShift(shift)}><Text style={styles.secondaryButtonText}>Редактировать</Text></Pressable>
                             <Pressable style={styles.dangerButton} onPress={() => deleteShift(shift)}><Text style={styles.dangerButtonText}>Удалить</Text></Pressable>
