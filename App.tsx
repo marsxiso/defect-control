@@ -41,7 +41,6 @@ type DefectItem = {
   affectedCount: number;
   comment: string;
   imageUri?: string;
-  reviewStatus: DefectReviewStatus;
 };
 
 type Inspection = {
@@ -300,11 +299,6 @@ function monthFolderName(date: string) {
   return `${monthNames[month] || month} ${year}`;
 }
 
-function normalizeReviewStatus(value?: string): DefectReviewStatus {
-  if (value === 'Забраковано' || value === 'Допущено до сборки') return value;
-  return 'На рассмотрении';
-}
-
 function isCurrentMonth(date: string) {
   if (!date) return false;
   const now = new Date();
@@ -560,39 +554,6 @@ export default function App() {
     return grouped;
   }, [reportBatches]);
 
-  const batchMatchesReportStatus = (batch: Batch) => {
-    if (reportStatusFilter === 'Все') return true;
-    const inspection = inspections.find((item) => item.batchId === batch.id);
-    if (!inspection) return false;
-    return inspection.defects.some((defect) => defect.reviewStatus === reportStatusFilter);
-  };
-
-  const batchMatchesReportDates = (batch: Batch) => {
-    const compareDate = batch.sentToAssemblyAt || batch.manufactureDate;
-    if (!reportDateFrom && !reportDateTo) return true;
-    return isDateInRange(compareDate, reportDateFrom, reportDateTo);
-  };
-
-  const filteredReadyToSendBatches = useMemo(
-    () => readyToSendBatches.filter((batch) => batchMatchesReportDates(batch) && batchMatchesReportStatus(batch)),
-    [readyToSendBatches, reportDateFrom, reportDateTo, reportStatusFilter, inspections],
-  );
-
-  const filteredReportBatches = useMemo(
-    () => reportBatches.filter((batch) => batchMatchesReportDates(batch) && batchMatchesReportStatus(batch)),
-    [reportBatches, reportDateFrom, reportDateTo, reportStatusFilter, inspections],
-  );
-
-  const filteredFolderedArchive = useMemo(() => {
-    const grouped: Record<string, Batch[]> = {};
-    filteredReportBatches.forEach((b) => {
-      const folder = formatMonthFolderLabel(getArchiveDate(b));
-      if (!grouped[folder]) grouped[folder] = [];
-      grouped[folder].push(b);
-    });
-    return grouped;
-  }, [filteredReportBatches]);
-
   const visibleShifts = useMemo(
     () =>
       shifts
@@ -623,14 +584,12 @@ export default function App() {
       }
 
       setToken(data.token);
-      const nextUser = {
+      setCurrentUser({
         id: String(data.user.id),
         login: data.user.login || login.trim(),
         name: data.user.full_name,
         role: mapApiRoleToAppRole(data.user.role),
-      };
-      setCurrentUser(nextUser);
-      await AsyncStorage.setItem('lizun_current_user', JSON.stringify(nextUser));
+      });
       setScreen('dashboard');
       await syncAllFromServer();
     } catch {
@@ -638,8 +597,7 @@ export default function App() {
     }
   };
 
-  const handleLogout = async () => {
-    await AsyncStorage.removeItem('lizun_current_user');
+  const handleLogout = () => {
     setCurrentUser(null);
     setSelectedBatchId(null);
     setToken('');
@@ -839,24 +797,6 @@ export default function App() {
       'Готово',
       'Контроль сохранён локально в приложении. Серверные маршруты для отчётов добавим следующим шагом.',
     );
-  };
-
-  const updateDefectStatus = async (defectId: string, reviewStatus: DefectReviewStatus) => {
-    try {
-      const response = await fetch(`${API_URL}/api/inspection-defects/${defectId}/status`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ review_status: reviewStatus }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось изменить статус брака');
-        return;
-      }
-      await syncAllFromServer();
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось изменить статус брака');
-    }
   };
 
   const addWorker = async () => {
@@ -1300,120 +1240,321 @@ export default function App() {
           {screen === 'report' && (
             <View>
               <SectionTitle title="Отчёты" />
-
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Фильтры</Text>
+                <Text style={styles.cardTitle}>Фильтр по датам</Text>
                 <Label text="Дата от" />
-                <Pressable style={styles.datePickerButton} onPress={() => setShowReportFromPicker(true)}>
-                  <Text style={styles.datePickerButtonText}>{reportDateFrom ? formatDisplayDate(reportDateFrom) : 'Выбрать дату'}</Text>
-                </Pressable>
-                {showReportFromPicker && (
-                  <DateTimePicker value={reportDateFrom ? new Date(reportDateFrom) : new Date()} mode="date" display="default" onChange={onChangeReportFromDate} />
-                )}
+                <TextInput
+                  style={styles.input}
+                  value={reportDateFrom}
+                  onChangeText={setReportDateFrom}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={COLORS.muted}
+                />
                 <Label text="Дата до" />
-                <Pressable style={styles.datePickerButton} onPress={() => setShowReportToPicker(true)}>
-                  <Text style={styles.datePickerButtonText}>{reportDateTo ? formatDisplayDate(reportDateTo) : 'Выбрать дату'}</Text>
+                <TextInput
+                  style={styles.input}
+                  value={reportDateTo}
+                  onChangeText={setReportDateTo}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={COLORS.muted}
+                />
+                <Pressable
+                  style={styles.secondaryButton}
+                  onPress={() => {
+                    setReportDateFrom('');
+                    setReportDateTo('');
+                  }}
+                >
+                  <Text style={styles.secondaryButtonText}>Сбросить фильтр</Text>
                 </Pressable>
-                {showReportToPicker && (
-                  <DateTimePicker value={reportDateTo ? new Date(reportDateTo) : new Date()} mode="date" display="default" onChange={onChangeReportToDate} />
-                )}
-                <Label text="Статус брака" />
-                <View style={styles.roleRow}>
-                  {(['Все', 'Забраковано', 'На рассмотрении', 'Допущено до сборки'] as const).map((status) => (
-                    <Pressable key={status} style={[styles.roleButton, reportStatusFilter === status && styles.roleButtonActive]} onPress={() => setReportStatusFilter(status)}>
-                      <Text style={[styles.roleButtonText, reportStatusFilter === status && styles.roleButtonTextActive]}>{status}</Text>
-                    </Pressable>
-                  ))}
-                </View>
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Готовы к отправке</Text>
-                {filteredReadyToSendBatches.length === 0 ? (
-                  <Text style={styles.text}>Нет партий, готовых к отправке.</Text>
+                <Text style={styles.cardTitle}>Отчёты за последний месяц</Text>
+                {recentArchive.length === 0 ? (
+                  <Text style={styles.text}>Нет отчётов за последний месяц.</Text>
                 ) : (
-                  filteredReadyToSendBatches.map((batch) => renderBatchCard(batch, 'report'))
+                  recentArchive.map((batch) => renderBatchCard(batch))
                 )}
               </View>
 
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Архив по месяцам</Text>
-                {Object.keys(filteredFolderedArchive).length === 0 ? (
-                  <Text style={styles.text}>Архивных партий пока нет.</Text>
+                {Object.keys(folderedArchive).length === 0 ? (
+                  <Text style={styles.text}>Архивных отчётов старше месяца нет.</Text>
                 ) : (
-                  Object.entries(filteredFolderedArchive).map(([folder, items]) => {
-                    const isExpandedMonth = expandedArchiveMonths.includes(folder);
-                    return (
-                      <View key={folder} style={styles.cardSoft}>
-                        <Pressable style={styles.rowBetween} onPress={() => setExpandedArchiveMonths((prev) => prev.includes(folder) ? prev.filter((item) => item !== folder) : [...prev, folder])}>
-                          <Text style={styles.cardSubTitle}>{folder}</Text>
-                          <Text style={styles.textBold}>{isExpandedMonth ? '−' : '+'}</Text>
-                        </Pressable>
-                        {isExpandedMonth && (items as Batch[]).map((batch) => renderBatchCard(batch, 'report'))}
-                      </View>
-                    );
-                  })
+                  Object.entries(folderedArchive).map(([folder, items]) => (
+                    <View key={folder} style={styles.cardSoft}>
+                      <Text style={styles.cardSubTitle}>{folder}</Text>
+                      {items.map((batch) => renderBatchCard(batch))}
+                    </View>
+                  ))
                 )}
               </View>
             </View>
           )}
 
-          {screen === 'defects' && (
+          {screen === 'schedule' && showScheduleTab && (
             <View>
-              <SectionTitle title="Брак" />
-              {Object.keys(defectBatchesByProduct).length === 0 ? (
-                <View style={styles.card}><Text style={styles.text}>Записей о браке пока нет.</Text></View>
-              ) : (
-                Object.entries(defectBatchesByProduct).map(([productName, items]) => (
-                  <View key={productName} style={styles.card}>
-                    <Text style={styles.cardTitle}>{productName}</Text>
-                    {items.map((batch) => {
-                      const inspection = inspections.find((item) => item.batchId === batch.id);
-                      const firstDefect = inspection?.defects?.[0];
-                      const isExpanded = defectExpandedBatchId === batch.id;
-                      return (
-                        <View key={batch.id} style={styles.historyItem}>
-                          <Pressable onPress={() => setDefectExpandedBatchId((prev) => (prev === batch.id ? null : batch.id))}>
-                            <Text style={styles.defectItemTitle}>{batch.productName}</Text>
-                            <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection?.date)}</Text>
-                            {!!firstDefect?.imageUri && <Image source={{ uri: firstDefect.imageUri }} style={styles.imagePreviewSmall} />}
-                          </Pressable>
-                          {isExpanded && inspection && (
-                            <View style={styles.cardSoft}>
-                              <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
-                              <Text style={styles.text}>Дата создания: {formatDisplayDate(batch.manufactureDate)}</Text>
-                              <Text style={styles.text}>Дата проверки: {formatDisplayDate(inspection.date)}</Text>
-                              <Text style={styles.text}>Дата отправки: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>
-                              <Text style={styles.text}>Работник: {batch.workerName}</Text>
-                              <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
-                              <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
-                              {inspection.defects.map((defect) => (
-                                <View key={defect.id} style={styles.historyItem}>
-                                  <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
-                                  <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
-                                  <Text style={styles.text}>Статус: {defect.reviewStatus}</Text>
-                                  <View style={styles.statusButtonRow}>
-                                    {(['Забраковано', 'На рассмотрении', 'Допущено до сборки'] as DefectReviewStatus[]).map((status) => (
-                                      <Pressable
-                                        key={status}
-                                        style={[styles.statusOptionButton, defect.reviewStatus === status && styles.roleButtonActive]}
-                                        onPress={() => updateDefectStatus(defect.id, status)}
-                                      >
-                                        <Text style={[styles.roleButtonText, defect.reviewStatus === status && styles.roleButtonTextActive]}>{status}</Text>
-                                      </Pressable>
-                                    ))}
-                                  </View>
-                                </View>
-                              ))}
-                            </View>
-                          )}
-                        </View>
-                      );
-                    })}
-                  </View>
-                ))
-              )}
+              <SectionTitle title="Смены" />
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Отметить выход на смену</Text>
+                <Label text="Дата" />
+                <TextInput
+                  style={styles.input}
+                  value={shiftDate}
+                  onChangeText={setShiftDate}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={COLORS.muted}
+                />
+                <Label text="Рабочий" />
+                <View style={styles.roleRow}>
+                  {workers.map((worker) => (
+                    <Pressable
+                      key={worker.id}
+                      style={[styles.roleButton, shiftEmployeeName === worker.name && styles.roleButtonActive]}
+                      onPress={() => setShiftEmployeeName(worker.name)}
+                    >
+                      <Text
+                        style={[styles.roleButtonText, shiftEmployeeName === worker.name && styles.roleButtonTextActive]}
+                      >
+                        {worker.name}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Pressable style={styles.primaryButton} onPress={addShift}>
+                  <Text style={styles.primaryButtonText}>Отметить выход на смену</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Список смен</Text>
+                {visibleShifts.length === 0 ? (
+                  <Text style={styles.text}>На выбранную дату никто не отмечен в смене.</Text>
+                ) : (
+                  visibleShifts.map((shift) => (
+                    <View key={shift.id} style={styles.historyItem}>
+                      <Text style={styles.text}><Text style={styles.textBold}>{shift.date}</Text></Text>
+                      <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
+                      <Text style={styles.text}>Роль: {shift.role}</Text>
+                    </View>
+                  ))
+                )}
+              </View>
             </View>
           )}
 
-          ;
+          {screen === 'admin' && currentUser.role === 'Администратор' && (
+            <View>
+              <SectionTitle title="Панель администратора" />
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Пользователи</Text>
+                {users.map((u) => (
+                  <View key={u.id} style={styles.historyItem}>
+                    <Text style={styles.text}><Text style={styles.textBold}>{u.name}</Text></Text>
+                    <Text style={styles.text}>Логин: {u.login}</Text>
+                    <Text style={styles.text}>Роль: {u.role}</Text>
+                  </View>
+                ))}
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Рабочие</Text>
+                <Label text="Новый рабочий" />
+                <TextInput style={styles.input} value={newWorkerName} onChangeText={setNewWorkerName} />
+                <Pressable style={styles.primaryButton} onPress={addWorker}>
+                  <Text style={styles.primaryButtonText}>Добавить рабочего</Text>
+                </Pressable>
+                {workers.map((worker) => (
+                  <View key={worker.id} style={styles.historyItem}>
+                    <Text style={styles.text}>{worker.name}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: '#020617' },
+  container: { padding: 16, alignItems: 'center' },
+  phone: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: COLORS.bg,
+    borderRadius: 24,
+    padding: 16,
+    minHeight: '100%',
+  },
+  headerBlock: { marginBottom: 18 },
+  title: { color: COLORS.text, fontSize: 30, fontWeight: '800' },
+  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  topRole: {
+    color: COLORS.accent2,
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  topName: { color: COLORS.text, fontSize: 20, fontWeight: '700', marginTop: 2 },
+  navRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 16, marginBottom: 18 },
+  tabButton: {
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  tabButtonActive: { backgroundColor: '#1d4ed8' },
+  tabButtonText: { color: COLORS.text, fontWeight: '600' },
+  card: {
+    backgroundColor: COLORS.card,
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  cardSoft: {
+    backgroundColor: '#162033',
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  cardTitle: { color: COLORS.text, fontSize: 18, fontWeight: '700', marginBottom: 10 },
+  cardSubTitle: { color: COLORS.text, fontSize: 16, fontWeight: '700', marginBottom: 8 },
+  text: { color: COLORS.text, fontSize: 14, lineHeight: 20, marginVertical: 2 },
+  textBold: { fontWeight: '700' },
+  label: { color: COLORS.muted, fontSize: 13, marginTop: 8, marginBottom: 6 },
+  input: {
+    width: '100%',
+    backgroundColor: '#0b1220',
+    color: COLORS.text,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  textarea: {
+    width: '100%',
+    minHeight: 88,
+    backgroundColor: '#0b1220',
+    color: COLORS.text,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+    textAlignVertical: 'top',
+  },
+  primaryButton: {
+    width: '100%',
+    backgroundColor: COLORS.accent,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginTop: 8,
+    alignItems: 'center',
+  },
+  primaryButtonText: { color: '#052e16', fontWeight: '800' },
+  secondaryButton: {
+    backgroundColor: COLORS.soft,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
+  sectionTitle: { color: COLORS.text, fontSize: 22, fontWeight: '700', marginBottom: 12 },
+  grid2: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 },
+  statCard: {
+    width: '48%',
+    backgroundColor: COLORS.card,
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginRight: '2%',
+    marginBottom: 10,
+  },
+  statValue: { fontSize: 28, fontWeight: '800', color: COLORS.accent2 },
+  statTitle: { marginTop: 6, color: COLORS.muted, fontSize: 13 },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  badge: { borderRadius: 999, paddingVertical: 6, paddingHorizontal: 10, marginLeft: 8 },
+  badgeText: { color: 'white', fontSize: 12, fontWeight: '700' },
+  actionsWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12 },
+  aiBox: {
+    backgroundColor: '#082f49',
+    borderWidth: 1,
+    borderColor: '#0ea5e9',
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 12,
+    marginBottom: 12,
+  },
+  historyItem: { borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 10, marginTop: 10 },
+  previewBox: {
+    backgroundColor: '#0b1220',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 12,
+  },
+  imagePreview: { width: '100%', height: 260, borderRadius: 12, marginBottom: 12, backgroundColor: '#000' },
+  imagePreviewSmall: {
+    width: '100%',
+    height: 180,
+    borderRadius: 10,
+    marginTop: 8,
+    marginBottom: 8,
+    backgroundColor: '#000',
+  },
+  roleRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8, marginTop: 4 },
+  roleButton: {
+    backgroundColor: '#0b1220',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  roleButtonActive: { backgroundColor: COLORS.accent2, borderColor: COLORS.accent2 },
+  roleButtonText: { color: COLORS.text, fontWeight: '600' },
+  roleButtonTextActive: { color: '#082f49', fontWeight: '800' },
+  cameraScreen: { flex: 1, backgroundColor: 'black' },
+  cameraPreview: { flex: 1 },
+  cameraOverlay: {
+    flex: 1,
+    justifyContent: 'space-between',
+    padding: 20,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+  },
+  cameraTitle: { color: 'white', fontSize: 20, fontWeight: '700', marginTop: 20 },
+  cameraActions: { marginBottom: 24 },
+  captureButton: {
+    backgroundColor: 'white',
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  captureButtonText: { color: '#111827', fontWeight: '800', fontSize: 16 },
+});
