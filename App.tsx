@@ -13,6 +13,7 @@ import {
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор';
 type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Готова к отправке' | 'Отправлено на сборку';
@@ -24,6 +25,7 @@ type DefectClass =
   | 'Вмятина'
   | 'Раковина'
   | 'Неопределено';
+type DefectReviewStatus = 'Забраковано' | 'На рассмотрении' | 'Допущено до сборки';
 
 type Screen = 'dashboard' | 'batches' | 'inspection' | 'report' | 'schedule' | 'admin' | 'defects';
 
@@ -49,6 +51,7 @@ type DefectItem = {
   confidence: number;
   affectedCount: number;
   comment: string;
+  reviewStatus: DefectReviewStatus;
   imageUri?: string;
 };
 
@@ -161,6 +164,7 @@ type ApiInspectionDefectRow = {
   confidence: number;
   affected_count: number;
   comment?: string;
+  review_status?: string | null;
   image_uri?: string | null;
 };
 
@@ -209,6 +213,7 @@ const monthNames: Record<string, string> = {
 };
 
 const PRODUCT_OPTIONS = ['Втулка', 'Переходник', 'Удлинитель', 'Корпус'] as const;
+const DEFECT_STATUS_OPTIONS: DefectReviewStatus[] = ['Забраковано', 'На рассмотрении', 'Допущено до сборки'];
 type ProductOption = (typeof PRODUCT_OPTIONS)[number];
 
 
@@ -338,6 +343,11 @@ function formatDisplayDate(value?: string) {
     return `${d}.${m}.${y}`;
   }
   return String(value);
+}
+
+function normalizeDefectReviewStatus(value?: string): DefectReviewStatus {
+  if (value === 'Забраковано' || value === 'Допущено до сборки') return value;
+  return 'На рассмотрении';
 }
 
 function getArchiveDate(batch: Batch) {
@@ -480,6 +490,10 @@ export default function App() {
   const [showShiftDatePicker, setShowShiftDatePicker] = useState(false);
 
   const [defectExpandedBatchId, setDefectExpandedBatchId] = useState<string | null>(null);
+  const [reportDateFrom, setReportDateFrom] = useState('');
+  const [reportDateTo, setReportDateTo] = useState('');
+  const [reportDefectStatus, setReportDefectStatus] = useState<'Все' | DefectReviewStatus>('Все');
+  const [expandedArchiveMonths, setExpandedArchiveMonths] = useState<string[]>([]);
 
   const controllers = useMemo(
     () => users.filter((user) => user.role === 'Контролер' || user.role === 'Контрольный мастер'),
@@ -567,18 +581,28 @@ export default function App() {
     [batches],
   );
 
+  const batchMatchesReportFilters = (batch: Batch) => {
+    const archiveDate = getArchiveDate(batch);
+    if (!isDateInRange(archiveDate, reportDateFrom, reportDateTo)) return false;
+    if (reportDefectStatus === 'Все') return true;
+    const inspection = inspections.find((item) => item.batchId === batch.id);
+    return !!inspection?.defects?.some((defect) => defect.reviewStatus === reportDefectStatus);
+  };
+
   const readyToSendBatches = useMemo(
     () => batches
       .filter((b) => b.status === 'Готова к отправке')
+      .filter(batchMatchesReportFilters)
       .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
-    [batches],
+    [batches, reportDateFrom, reportDateTo, reportDefectStatus, inspections],
   );
 
   const reportBatches = useMemo(
     () => batches
       .filter((b) => b.status === 'Отправлено на сборку')
+      .filter(batchMatchesReportFilters)
       .sort((a, b) => dateToMs(getArchiveDate(b)) - dateToMs(getArchiveDate(a))),
-    [batches],
+    [batches, reportDateFrom, reportDateTo, reportDefectStatus, inspections],
   );
 
   const folderedArchive = useMemo(() => {
@@ -738,6 +762,7 @@ export default function App() {
         confidence: Number(defect.confidence || 0),
         affectedCount: Number(defect.affected_count || 0),
         comment: defect.comment || '',
+        reviewStatus: normalizeDefectReviewStatus(defect.review_status),
         imageUri: defect.image_uri || undefined,
       })),
       acceptedCount: Number(item.accepted_count || 0),
@@ -764,6 +789,30 @@ export default function App() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('lizun_current_user');
+        if (raw) {
+          const user = JSON.parse(raw) as User;
+          setCurrentUser(user);
+        }
+      } catch {}
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        if (currentUser) {
+          await AsyncStorage.setItem('lizun_current_user', JSON.stringify(currentUser));
+        } else {
+          await AsyncStorage.removeItem('lizun_current_user');
+        }
+      } catch {}
+    })();
+  }, [currentUser]);
 
   useEffect(() => {
     if (!selectedBatchId) return;
@@ -807,12 +856,14 @@ export default function App() {
         return;
       }
       setToken(data.token);
-      setCurrentUser({
+      const nextUser = {
         id: String(data.user.id),
         login: data.user.login || login.trim(),
         name: data.user.full_name,
         role: mapApiRoleToAppRole(data.user.role),
-      });
+      };
+      setCurrentUser(nextUser);
+      await AsyncStorage.setItem('lizun_current_user', JSON.stringify(nextUser));
       setScreen('dashboard');
       await syncAllFromServer();
     } catch {
@@ -820,7 +871,8 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await AsyncStorage.removeItem('lizun_current_user');
     setCurrentUser(null);
     setSelectedBatchId(null);
     setEditingBatchId(null);
@@ -1066,6 +1118,7 @@ export default function App() {
       confidence: inferenceState.confidence,
       affectedCount,
       comment: defectComment.trim(),
+      reviewStatus: 'На рассмотрении',
       imageUri: inspectionForm.imageUri || undefined,
     }, ...prev]);
     setDefectComment('');
@@ -1098,6 +1151,7 @@ export default function App() {
         confidence: item.confidence,
         affected_count: item.affectedCount,
         comment: item.comment,
+        review_status: item.reviewStatus,
         image_uri: item.imageUri,
       })),
     };
@@ -1116,8 +1170,9 @@ export default function App() {
         return;
       }
       await syncAllFromServer();
-      setSelectedBatchId(selectedBatch.id);
+      setSelectedBatchId(null);
       setIsControlEditMode(false);
+      setScreen('batches');
       Alert.alert('Готово', selectedInspection ? 'Контроль обновлен' : 'Контроль сохранен');
     } catch {
       Alert.alert('Ошибка', 'Не удалось сохранить контроль');
@@ -1506,6 +1561,7 @@ export default function App() {
                   <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
                   <Text style={styles.text}>Уверенность AI: {(defect.confidence * 100).toFixed(1)}%</Text>
                   <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
+                  <Text style={styles.text}>Статус брака: {defect.reviewStatus}</Text>
                   {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
                 </View>
               ))
@@ -1894,6 +1950,22 @@ export default function App() {
               <SectionTitle title="Отчёты" />
 
               <View style={styles.card}>
+                <Text style={styles.cardTitle}>Фильтр</Text>
+                <Label text="Дата от" />
+                <TextInput style={styles.input} value={reportDateFrom} onChangeText={setReportDateFrom} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} />
+                <Label text="Дата до" />
+                <TextInput style={styles.input} value={reportDateTo} onChangeText={setReportDateTo} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} />
+                <Label text="Статус брака" />
+                <View style={styles.filterRow}>
+                  {(['Все', ...DEFECT_STATUS_OPTIONS] as const).map((status) => (
+                    <Pressable key={status} style={[styles.filterChip, reportDefectStatus === status && styles.filterChipActive]} onPress={() => setReportDefectStatus(status as any)}>
+                      <Text style={[styles.filterChipText, reportDefectStatus === status && styles.filterChipTextActive]}>{status}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+
+              <View style={styles.card}>
                 <Text style={styles.cardTitle}>Готовы к отправке</Text>
                 {readyToSendBatches.length === 0 ? (
                   <Text style={styles.text}>Нет партий, готовых к отправке.</Text>
@@ -1907,12 +1979,18 @@ export default function App() {
                 {Object.keys(folderedArchive).length === 0 ? (
                   <Text style={styles.text}>Архивных партий пока нет.</Text>
                 ) : (
-                  Object.entries(folderedArchive).map(([folder, items]) => (
-                    <View key={folder} style={styles.cardSoft}>
-                      <Text style={styles.cardSubTitle}>{folder}</Text>
-                      {(items as Batch[]).map((batch) => renderBatchCard(batch, 'report'))}
-                    </View>
-                  ))
+                  Object.entries(folderedArchive).map(([folder, items]) => {
+                    const isOpen = expandedArchiveMonths.includes(folder);
+                    return (
+                      <View key={folder} style={styles.cardSoft}>
+                        <Pressable style={styles.rowBetween} onPress={() => setExpandedArchiveMonths((prev) => prev.includes(folder) ? prev.filter((item) => item !== folder) : [...prev, folder])}>
+                          <Text style={styles.cardSubTitle}>{folder}</Text>
+                          <Text style={styles.text}>{isOpen ? '−' : '+'}</Text>
+                        </Pressable>
+                        {isOpen && (items as Batch[]).map((batch) => renderBatchCard(batch, 'report'))}
+                      </View>
+                    );
+                  })
                 )}
               </View>
             </View>
@@ -1945,10 +2023,38 @@ export default function App() {
                               <Text style={styles.text}>Работник: {batch.workerName}</Text>
                               <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
                               <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
-                                                {inspection.defects.map((defect) => (
+                              {inspection.defects.map((defect) => (
                                 <View key={defect.id} style={styles.historyItem}>
                                   <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
                                   <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
+                                  <Text style={styles.text}>Статус: {defect.reviewStatus}</Text>
+                                  <View style={styles.filterRow}>
+                                    {DEFECT_STATUS_OPTIONS.map((status) => (
+                                      <Pressable
+                                        key={status}
+                                        style={[styles.filterChip, defect.reviewStatus === status && styles.filterChipActive]}
+                                        onPress={async () => {
+                                          try {
+                                            const response = await fetch(`${API_URL}/api/inspection-defects/${defect.id}/status`, {
+                                              method: 'PUT',
+                                              headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ review_status: status }),
+                                            });
+                                            const data = await readJson(response);
+                                            if (!response.ok) {
+                                              Alert.alert('Ошибка', data?.message || 'Не удалось обновить статус брака');
+                                              return;
+                                            }
+                                            await syncAllFromServer();
+                                          } catch {
+                                            Alert.alert('Ошибка', 'Не удалось обновить статус брака');
+                                          }
+                                        }}
+                                      >
+                                        <Text style={[styles.filterChipText, defect.reviewStatus === status && styles.filterChipTextActive]}>{status}</Text>
+                                      </Pressable>
+                                    ))}
+                                  </View>
                                 </View>
                               ))}
                             </View>
@@ -2139,8 +2245,8 @@ const styles = StyleSheet.create({
   primaryButtonText: { color: '#052e16', fontWeight: '800' },
   secondaryButton: { backgroundColor: COLORS.soft, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
-  iconButton: { width: 56, height: 56, backgroundColor: COLORS.soft, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  iconButtonText: { color: COLORS.text, fontSize: 24, fontWeight: '800' },
+  iconButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  iconButtonText: { color: COLORS.text, fontSize: 20, fontWeight: '800' },
   smallCloseButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   smallCloseButtonText: { color: COLORS.text, fontSize: 28, fontWeight: '700', lineHeight: 28 },
   dangerButton: { backgroundColor: '#7f1d1d', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
@@ -2154,7 +2260,7 @@ const styles = StyleSheet.create({
   inspectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   badge: { borderRadius: 999, paddingVertical: 6, paddingHorizontal: 10, marginLeft: 8 },
   badgeText: { color: 'white', fontSize: 12, fontWeight: '700' },
-  actionsWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12 },
+  actionsWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12, gap: 8 },
   aiBox: { backgroundColor: '#082f49', borderWidth: 1, borderColor: '#0ea5e9', borderRadius: 14, padding: 12, marginTop: 12, marginBottom: 12 },
   historyItem: { borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 10, marginTop: 10 },
   previewBox: { backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 14, padding: 12, marginBottom: 12 },
@@ -2183,6 +2289,11 @@ const styles = StyleSheet.create({
   dropdownItemActive: { backgroundColor: '#1e3a8a' },
   dropdownItemText: { color: COLORS.text, fontSize: 15, fontWeight: '600' },
   dropdownItemTextActive: { color: '#dbeafe' },
-  defectItemTitle: { color: COLORS.accent2, fontSize: 18, fontWeight: '700', textDecorationLine: 'underline', marginBottom: 4 },
+  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  filterChip: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, marginBottom: 8 },
+  filterChipActive: { backgroundColor: COLORS.accent2, borderColor: COLORS.accent2 },
+  filterChipText: { color: COLORS.text, fontWeight: '600', fontSize: 12 },
+  filterChipTextActive: { color: '#082f49', fontWeight: '800' },
+  defectItemTitle: { color: COLORS.accent2, fontSize: 20, fontWeight: '700', textDecorationLine: 'underline', marginBottom: 4 },
 });
 
