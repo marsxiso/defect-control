@@ -1,10 +1,19 @@
 {
   "expo": {
-    "name": "defect-control-app",
-    "slug": "defect-control-app",
+    "name": "Defect control",
+    "slug": "defect-control",
     "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
     "android": {
-      "usesCleartextTraffic": true
+      "package": "com.marsxiso.defectcontrol",
+      "versionCode": 1,
+      "usesCleartextTraffic": false
+    },
+    "extra": {
+      "eas": {
+        "projectId": "4924c4fa-f4c4-4a2f-84d0-f48ca82745e8"
+      }
     }
   }
 }
