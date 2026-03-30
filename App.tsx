@@ -328,21 +328,38 @@ function todayStr() {
   return formatDate(new Date());
 }
 
+function normalizeDateValue(value?: string) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+  }
+  const ruMatch = raw.match(/^(\d{2})\.(\d{2})\.(\d{2,4})$/);
+  if (ruMatch) {
+    const [, d, m, y] = ruMatch;
+    const fullYear = y.length === 2 ? `20${y}` : y;
+    return `${fullYear}-${m}-${d}`;
+  }
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    const y = String(parsed.getFullYear());
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return raw;
+}
+
 function formatDisplayDate(value?: string) {
   if (!value) return '—';
-  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const normalized = normalizeDateValue(value);
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (match) {
     const [, y, m, d] = match;
     return `${d}.${m}.${y.slice(-2)}`;
   }
-  const parsed = new Date(value);
-  if (!Number.isNaN(parsed.getTime())) {
-    const d = String(parsed.getDate()).padStart(2, '0');
-    const m = String(parsed.getMonth() + 1).padStart(2, '0');
-    const y = String(parsed.getFullYear()).slice(-2);
-    return `${d}.${m}.${y}`;
-  }
-  return String(value);
+  return normalized || '—';
 }
 
 function normalizeDefectReviewStatus(value?: string): DefectReviewStatus {
@@ -773,7 +790,7 @@ export default function App() {
       batchId: String(item.batch_id),
       inspectorId: String(item.inspector_id),
       inspector: item.inspector_name,
-      date: String(item.inspection_date).slice(0, 10),
+      date: normalizeDateValue(String(item.inspection_date)),
       visualConclusion: item.visual_conclusion || '',
       geometryConclusion: item.geometry_conclusion || '',
       defects: (item.defects || []).map((defect) => ({

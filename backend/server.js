@@ -32,13 +32,24 @@ function toInt(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function normalizeDateString(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) {
+    return date.toISOString().slice(0, 10);
+  }
+  const raw = String(value).trim();
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : raw;
+}
+
 function mapInspectionRow(row) {
   return {
     id: String(row.id),
     batch_id: String(row.batch_id),
     inspector_id: String(row.inspector_id),
     inspector_name: row.inspector_name,
-    inspection_date: String(row.inspection_date).slice(0, 10),
+    inspection_date: normalizeDateString(row.inspection_date),
     visual_conclusion: row.visual_conclusion || '',
     geometry_conclusion: row.geometry_conclusion || '',
     accepted_count: Number(row.accepted_count || 0),
