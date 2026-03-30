@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Defect control",
-    "slug": "defect-control",
+    "slug": "defect-control-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
