@@ -5,6 +5,8 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0f172a"
     "android": {
       "package": "com.marsxiso.defectcontrol",
       "versionCode": 1,
