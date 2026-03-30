@@ -13,10 +13,9 @@ import {
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Role = 'Производственный мастер' | 'Контролер' | 'Контрольный мастер' | 'Администратор';
-type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Готова к отправке' | 'Отправлено на сборку';
+type BatchStatus = 'Готова к проверке' | 'Проверена' | 'Отправлено на сборку';
 type DefectClass =
   | 'Без дефекта'
   | 'Царапина'
@@ -25,9 +24,8 @@ type DefectClass =
   | 'Вмятина'
   | 'Раковина'
   | 'Неопределено';
-type DefectReviewStatus = 'Забраковано' | 'На рассмотрении' | 'Допущено до сборки';
 
-type Screen = 'dashboard' | 'batches' | 'inspection' | 'report' | 'schedule' | 'admin' | 'defects';
+type Screen = 'dashboard' | 'batches' | 'inspection' | 'report' | 'schedule' | 'admin';
 
 type Batch = {
   id: string;
@@ -42,7 +40,6 @@ type Batch = {
   inspectorId?: string;
   inspectorName?: string;
   acceptedByUserId?: string;
-  sentToAssemblyAt?: string;
 };
 
 type DefectItem = {
@@ -51,7 +48,6 @@ type DefectItem = {
   confidence: number;
   affectedCount: number;
   comment: string;
-  reviewStatus: DefectReviewStatus;
   imageUri?: string;
 };
 
@@ -143,7 +139,6 @@ type ApiBatchRow = {
   inspector_id?: number | string | null;
   inspector_name?: string | null;
   accepted_by_user_id?: number | string | null;
-  sent_to_assembly_at?: string | null;
 };
 
 type ApiShiftRow = {
@@ -164,7 +159,6 @@ type ApiInspectionDefectRow = {
   confidence: number;
   affected_count: number;
   comment?: string;
-  review_status?: string | null;
   image_uri?: string | null;
 };
 
@@ -211,11 +205,6 @@ const monthNames: Record<string, string> = {
   '11': 'Ноябрь',
   '12': 'Декабрь',
 };
-
-const PRODUCT_OPTIONS = ['Втулка', 'Переходник', 'Удлинитель', 'Корпус'] as const;
-const DEFECT_STATUS_OPTIONS: DefectReviewStatus[] = ['Забраковано', 'На рассмотрении', 'Допущено до сборки'];
-type ProductOption = (typeof PRODUCT_OPTIONS)[number];
-
 
 function mapApiRoleToAppRole(role: string): Role {
   const roleMap: Record<string, Role> = {
@@ -328,36 +317,6 @@ function todayStr() {
   return formatDate(new Date());
 }
 
-function formatDisplayDate(value?: string) {
-  if (!value) return '—';
-  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (match) {
-    const [, y, m, d] = match;
-    return `${d}.${m}.${y.slice(-2)}`;
-  }
-  const parsed = new Date(value);
-  if (!Number.isNaN(parsed.getTime())) {
-    const d = String(parsed.getDate()).padStart(2, '0');
-    const m = String(parsed.getMonth() + 1).padStart(2, '0');
-    const y = String(parsed.getFullYear()).slice(-2);
-    return `${d}.${m}.${y}`;
-  }
-  return String(value);
-}
-
-function normalizeDefectReviewStatus(value?: string): DefectReviewStatus {
-  if (value === 'Забраковано' || value === 'Допущено до сборки') return value;
-  return 'На рассмотрении';
-}
-
-function getArchiveDate(batch: Batch) {
-  return batch.sentToAssemblyAt || batch.manufactureDate;
-}
-
-function formatMonthFolderLabel(date: string) {
-  return monthFolderName(date);
-}
-
 function uid(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
@@ -415,13 +374,7 @@ function StatCard({ title, value }: { title: string; value: string }) {
 
 function StatusBadge({ status }: { status: BatchStatus }) {
   const backgroundColor =
-    status === 'Готова к проверке'
-      ? '#2563eb'
-      : status === 'Проверена'
-      ? '#15803d'
-      : status === 'Готова к отправке'
-      ? '#f59e0b'
-      : '#6b7280';
+    status === 'Готова к проверке' ? '#2563eb' : status === 'Проверена' ? '#15803d' : '#6b7280';
   return (
     <View style={[styles.badge, { backgroundColor }]}>
       <Text style={styles.badgeText}>{status}</Text>
@@ -454,21 +407,15 @@ export default function App() {
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
   const [reportSelectedBatchId, setReportSelectedBatchId] = useState<string | null>(null);
-  const [isControlEditMode, setIsControlEditMode] = useState(false);
-  const [adminScheduleType, setAdminScheduleType] = useState<ShiftEmployeeType>('worker');
-  const [editingUserId, setEditingUserId] = useState<string | null>(null);
-  const [userForm, setUserForm] = useState({ name: '', login: '', password: '', role: 'Контролер' as Role });
-  const [editingWorkerId, setEditingWorkerId] = useState<string | null>(null);
-  const [workerFormName, setWorkerFormName] = useState('');
 
   const [newBatch, setNewBatch] = useState({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
-  const [showProductMenu, setShowProductMenu] = useState(false);
   const [newWorkerName, setNewWorkerName] = useState('');
   const [inspectionForm, setInspectionForm] = useState({
     visualConclusion: '',
     geometryConclusion: '',
     acceptedCount: '0',
     rejectedCount: '0',
+    comment: '',
     imageUri: '',
   });
   const [detectedDefects, setDetectedDefects] = useState<DefectItem[]>([]);
@@ -489,13 +436,8 @@ export default function App() {
   const [shiftEmployeeName, setShiftEmployeeName] = useState('');
   const [showShiftDatePicker, setShowShiftDatePicker] = useState(false);
 
-  const [defectExpandedBatchId, setDefectExpandedBatchId] = useState<string | null>(null);
   const [reportDateFrom, setReportDateFrom] = useState('');
   const [reportDateTo, setReportDateTo] = useState('');
-  const [reportDefectStatus, setReportDefectStatus] = useState<'Все' | DefectReviewStatus>('Все');
-  const [expandedArchiveMonths, setExpandedArchiveMonths] = useState<string[]>([]);
-  const [showReportFromPicker, setShowReportFromPicker] = useState(false);
-  const [showReportToPicker, setShowReportToPicker] = useState(false);
 
   const controllers = useMemo(
     () => users.filter((user) => user.role === 'Контролер' || user.role === 'Контрольный мастер'),
@@ -518,44 +460,6 @@ export default function App() {
     return selectedBatch.acceptedByUserId === currentUser.id;
   }, [currentUser, selectedBatch]);
 
-  const acceptedBatchForCurrentUser = useMemo(
-    () =>
-      currentUser
-        ? batches.find(
-            (b) =>
-              b.acceptedByUserId === currentUser.id &&
-              b.status !== 'Готова к отправке' &&
-              b.status !== 'Отправлено на сборку',
-          ) || null
-        : null,
-    [batches, currentUser],
-  );
-
-  const canCancelAcceptedBatch = useMemo(
-    () =>
-      !!(
-        currentUser &&
-        selectedBatch &&
-        selectedBatch.acceptedByUserId === currentUser.id &&
-        !selectedInspection &&
-        selectedBatch.status === 'Готова к проверке'
-      ),
-    [currentUser, selectedBatch, selectedInspection],
-  );
-
-  const canEditInspectionByCurrentUser = useMemo(
-    () =>
-      !!(
-        currentUser &&
-        selectedInspection &&
-        selectedInspection.inspectorId === currentUser.id &&
-        selectedBatch &&
-        selectedBatch.status !== 'Готова к отправке' &&
-        selectedBatch.status !== 'Отправлено на сборку'
-      ),
-    [currentUser, selectedInspection, selectedBatch],
-  );
-
   const reportSelectedBatch = useMemo(
     () => batches.find((b) => b.id === reportSelectedBatchId) || null,
     [batches, reportSelectedBatchId],
@@ -573,7 +477,7 @@ export default function App() {
       total: currentMonthBatches.length,
       readyCheck: currentMonthBatches.filter((b) => b.status === 'Готова к проверке').length,
       checked: currentMonthBatches.filter((b) => b.status === 'Проверена').length,
-      readyToSend: currentMonthBatches.filter((b) => b.status === 'Готова к отправке').length,
+      sentToAssembly: currentMonthBatches.filter((b) => b.status === 'Отправлено на сборку').length,
     }),
     [currentMonthBatches],
   );
@@ -583,65 +487,30 @@ export default function App() {
     [batches],
   );
 
-  const batchMatchesReportFilters = (batch: Batch) => {
-    const archiveDate = getArchiveDate(batch);
-    if (!isDateInRange(archiveDate, reportDateFrom, reportDateTo)) return false;
-    if (reportDefectStatus === 'Все') return true;
-    const inspection = inspections.find((item) => item.batchId === batch.id);
-    return !!inspection?.defects?.some((defect) => defect.reviewStatus === reportDefectStatus);
-  };
-
-  const readyToSendBatches = useMemo(
-    () => batches
-      .filter((b) => b.status === 'Готова к отправке')
-      .filter(batchMatchesReportFilters)
-      .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
-    [batches, reportDateFrom, reportDateTo, reportDefectStatus, inspections],
-  );
-
   const reportBatches = useMemo(
     () => batches
       .filter((b) => b.status === 'Отправлено на сборку')
-      .filter(batchMatchesReportFilters)
-      .sort((a, b) => dateToMs(getArchiveDate(b)) - dateToMs(getArchiveDate(a))),
-    [batches, reportDateFrom, reportDateTo, reportDefectStatus, inspections],
+      .filter((b) => isDateInRange(b.manufactureDate, reportDateFrom, reportDateTo))
+      .sort((a, b) => dateToMs(b.manufactureDate) - dateToMs(a.manufactureDate)),
+    [batches, reportDateFrom, reportDateTo],
   );
 
+  const recentArchive = useMemo(() => {
+    const monthAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    return reportBatches.filter((b) => dateToMs(b.manufactureDate) >= monthAgoMs);
+  }, [reportBatches]);
+
   const folderedArchive = useMemo(() => {
+    const monthAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const older = reportBatches.filter((b) => dateToMs(b.manufactureDate) < monthAgoMs);
     const grouped: Record<string, Batch[]> = {};
-    reportBatches.forEach((b) => {
-      const folder = formatMonthFolderLabel(getArchiveDate(b));
+    older.forEach((b) => {
+      const folder = monthFolderName(b.manufactureDate);
       if (!grouped[folder]) grouped[folder] = [];
       grouped[folder].push(b);
     });
     return grouped;
   }, [reportBatches]);
-
-
-
-  const defectBatchesByProduct = useMemo(() => {
-    const grouped: Record<string, Batch[]> = {};
-    batches
-      .filter((batch) => {
-        const inspection = inspections.find((item) => item.batchId === batch.id);
-        return !!inspection && inspection.defects.length > 0;
-      })
-      .forEach((batch) => {
-        if (!grouped[batch.productName]) grouped[batch.productName] = [];
-        grouped[batch.productName].push(batch);
-      });
-    return grouped;
-  }, [batches, inspections]);
-
-  const filteredBatchesForCurrentUser = useMemo(() => {
-    if (!currentUser) return visibleBatchesPage;
-    if (currentUser.role === 'Контролер' || currentUser.role === 'Контрольный мастер') {
-      return visibleBatchesPage.filter(
-        (b) => !b.acceptedByUserId || b.acceptedByUserId === currentUser.id,
-      );
-    }
-    return visibleBatchesPage;
-  }, [visibleBatchesPage, currentUser]);
 
   const visibleShifts = useMemo(
     () => shifts
@@ -678,11 +547,10 @@ export default function App() {
 
   const inspectionLocked = useMemo(() => {
     if (!selectedBatch) return true;
-    if (selectedBatch.status === 'Готова к отправке' || selectedBatch.status === 'Отправлено на сборку') return true;
+    if (selectedBatch.status === 'Отправлено на сборку') return true;
     if (!selectedInspection) return false;
-    if (!canEditInspectionByCurrentUser) return true;
-    return !isControlEditMode;
-  }, [selectedBatch, selectedInspection, canEditInspectionByCurrentUser, isControlEditMode]);
+    return !batchCanBeEditedByCurrentUser;
+  }, [selectedBatch, selectedInspection, batchCanBeEditedByCurrentUser]);
 
   const onChangeShiftDate = (event: DateTimePickerEvent, selectedDate?: Date) => {
     setShowShiftDatePicker(false);
@@ -691,7 +559,6 @@ export default function App() {
   };
 
   const openShiftDatePicker = () => setShowShiftDatePicker(true);
-
   const onChangeReportFromDate = (event: DateTimePickerEvent, selectedDate?: Date) => {
     setShowReportFromPicker(false);
     if (event.type === 'dismissed' || !selectedDate) return;
@@ -703,6 +570,7 @@ export default function App() {
     if (event.type === 'dismissed' || !selectedDate) return;
     setReportDateTo(formatDate(selectedDate));
   };
+
 
   const syncAllFromServer = async () => {
     const [usersRes, workersRes, batchesRes, shiftsRes, inspectionsRes] = await Promise.all([
@@ -749,7 +617,6 @@ export default function App() {
       inspectorId: item.inspector_id != null ? String(item.inspector_id) : undefined,
       inspectorName: item.inspector_name || undefined,
       acceptedByUserId: item.accepted_by_user_id != null ? String(item.accepted_by_user_id) : undefined,
-      sentToAssemblyAt: item.sent_to_assembly_at ? String(item.sent_to_assembly_at).slice(0, 10) : undefined,
     })));
 
     setShifts((shiftsData as ApiShiftRow[]).map((item) => ({
@@ -776,7 +643,6 @@ export default function App() {
         confidence: Number(defect.confidence || 0),
         affectedCount: Number(defect.affected_count || 0),
         comment: defect.comment || '',
-        reviewStatus: normalizeDefectReviewStatus(defect.review_status),
         imageUri: defect.image_uri || undefined,
       })),
       acceptedCount: Number(item.accepted_count || 0),
@@ -805,34 +671,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const raw = await AsyncStorage.getItem('lizun_current_user');
-        if (raw) {
-          const user = JSON.parse(raw) as User;
-          setCurrentUser(user);
-        }
-      } catch {}
-    })();
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        if (currentUser) {
-          await AsyncStorage.setItem('lizun_current_user', JSON.stringify(currentUser));
-        } else {
-          await AsyncStorage.removeItem('lizun_current_user');
-        }
-      } catch {}
-    })();
-  }, [currentUser]);
-
-  useEffect(() => {
     if (!selectedBatchId) return;
     const inspection = inspections.find((item) => item.batchId === selectedBatchId);
     if (!inspection) {
-      setInspectionForm({ visualConclusion: '', geometryConclusion: '', acceptedCount: '0', rejectedCount: '0', imageUri: '' });
+      setInspectionForm({ visualConclusion: '', geometryConclusion: '', acceptedCount: '0', rejectedCount: '0', comment: '', imageUri: '' });
       setDetectedDefects([]);
       return;
     }
@@ -841,21 +683,13 @@ export default function App() {
       geometryConclusion: inspection.geometryConclusion,
       acceptedCount: String(inspection.acceptedCount),
       rejectedCount: '0',
+      comment: inspection.comment,
       imageUri: '',
     });
     setDetectedDefects(inspection.defects);
     setDefectComment('');
     setInferenceState({ loading: false, defect: 'Неопределено', confidence: 0, summary: '' });
-    setIsControlEditMode(false);
   }, [selectedBatchId, inspections]);
-
-
-  useEffect(() => {
-    if (!currentUser || selectedBatchId) return;
-    if (acceptedBatchForCurrentUser) {
-      setSelectedBatchId(acceptedBatchForCurrentUser.id);
-    }
-  }, [currentUser, acceptedBatchForCurrentUser, selectedBatchId]);
 
   const handleLogin = async () => {
     try {
@@ -870,14 +704,12 @@ export default function App() {
         return;
       }
       setToken(data.token);
-      const nextUser = {
+      setCurrentUser({
         id: String(data.user.id),
         login: data.user.login || login.trim(),
         name: data.user.full_name,
         role: mapApiRoleToAppRole(data.user.role),
-      };
-      setCurrentUser(nextUser);
-      await AsyncStorage.setItem('lizun_current_user', JSON.stringify(nextUser));
+      });
       setScreen('dashboard');
       await syncAllFromServer();
     } catch {
@@ -885,8 +717,7 @@ export default function App() {
     }
   };
 
-  const handleLogout = async () => {
-    await AsyncStorage.removeItem('lizun_current_user');
+  const handleLogout = () => {
     setCurrentUser(null);
     setSelectedBatchId(null);
     setEditingBatchId(null);
@@ -898,13 +729,8 @@ export default function App() {
     setCameraOpen(false);
   };
 
-  const chooseProductName = () => {
-    setShowProductMenu((prev) => !prev);
-  };
-
   const resetBatchForm = () => {
     setEditingBatchId(null);
-    setShowProductMenu(false);
     setNewBatch({ productName: '', quantity: '1', manufactureDate: todayStr(), workerName: '' });
   };
 
@@ -981,7 +807,6 @@ export default function App() {
       manufactureDate: batch.manufactureDate,
       workerName: batch.workerName,
     });
-    setShowProductMenu(false);
     setScreen('batches');
   };
 
@@ -997,7 +822,7 @@ export default function App() {
             const response = await fetch(`${API_URL}/api/batches/${batch.id}`, {
               method: 'DELETE',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+              body: JSON.stringify({ editor_id: Number(currentUser.id) }),
             });
             const data = await readJson(response);
             if (!response.ok) {
@@ -1014,33 +839,13 @@ export default function App() {
     ]);
   };
 
-  const markBatchReadyToSend = async (batch: Batch) => {
-    if (!currentUser) return;
-    try {
-      const response = await fetch(`${API_URL}/api/batches/${batch.id}/mark-ready-to-send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось перевести партию в статус «Готова к отправке»');
-        return;
-      }
-      await syncAllFromServer();
-      Alert.alert('Готово', 'Партия переведена в статус «Готова к отправке»');
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось обновить статус партии');
-    }
-  };
-
   const sendBatchToAssembly = async (batch: Batch) => {
     if (!currentUser) return;
     try {
       const response = await fetch(`${API_URL}/api/batches/${batch.id}/send-to-assembly`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+        body: JSON.stringify({ editor_id: Number(currentUser.id) }),
       });
       const data = await readJson(response);
       if (!response.ok) {
@@ -1132,7 +937,6 @@ export default function App() {
       confidence: inferenceState.confidence,
       affectedCount,
       comment: defectComment.trim(),
-      reviewStatus: 'На рассмотрении',
       imageUri: inspectionForm.imageUri || undefined,
     }, ...prev]);
     setDefectComment('');
@@ -1159,13 +963,12 @@ export default function App() {
       geometry_conclusion: inspectionForm.geometryConclusion.trim(),
       accepted_count: acceptedCount,
       rejected_count: rejectedTotal,
-      comment: '',
+      comment: inspectionForm.comment.trim(),
       defects: detectedDefects.map((item) => ({
         defect_class: item.defectClass,
         confidence: item.confidence,
         affected_count: item.affectedCount,
         comment: item.comment,
-        review_status: item.reviewStatus,
         image_uri: item.imageUri,
       })),
     };
@@ -1184,9 +987,7 @@ export default function App() {
         return;
       }
       await syncAllFromServer();
-      setSelectedBatchId(null);
-      setIsControlEditMode(false);
-      setScreen('batches');
+      setSelectedBatchId(selectedBatch.id);
       Alert.alert('Готово', selectedInspection ? 'Контроль обновлен' : 'Контроль сохранен');
     } catch {
       Alert.alert('Ошибка', 'Не удалось сохранить контроль');
@@ -1218,32 +1019,6 @@ export default function App() {
     }
   };
 
-
-  const goToInspection = (batch: Batch) => {
-    setSelectedBatchId(batch.id);
-    setScreen('inspection');
-  };
-
-  const cancelAcceptedBatch = async (batch: Batch) => {
-    if (!currentUser) return;
-    try {
-      const response = await fetch(`${API_URL}/api/batches/${batch.id}/cancel-accept`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: Number(currentUser.id) }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось отменить контроль');
-        return;
-      }
-      await syncAllFromServer();
-      if (selectedBatchId === batch.id) setSelectedBatchId(null);
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось отменить контроль');
-    }
-  };
-
   const addWorker = async () => {
     const name = newWorkerName.trim();
     if (!name) {
@@ -1265,131 +1040,8 @@ export default function App() {
     Alert.alert('Готово', 'Рабочий добавлен');
   };
 
-
-  const startEditUser = (user: User) => {
-    setEditingUserId(user.id);
-    setUserForm({ name: user.name, login: user.login, password: '', role: user.role });
-    setScreen('admin');
-  };
-
-  const saveUser = async () => {
-    if (!currentUser || !editingUserId) return;
-    try {
-      const response = await fetch(`${API_URL}/api/users/${editingUserId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          full_name: userForm.name.trim(),
-          login: userForm.login.trim(),
-          password: userForm.password,
-          role: userForm.role,
-          editor_role: currentUser.role,
-        }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось обновить пользователя');
-        return;
-      }
-      await syncAllFromServer();
-      setEditingUserId(null);
-      setUserForm({ name: '', login: '', password: '', role: 'Контролер' });
-      Alert.alert('Готово', 'Пользователь обновлен');
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось обновить пользователя');
-    }
-  };
-
-  const deleteUser = (user: User) => {
-    if (!currentUser) return;
-    Alert.alert('Удаление пользователя', `Удалить пользователя ${user.name}?`, [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Удалить',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const response = await fetch(`${API_URL}/api/users/${user.id}`, {
-              method: 'DELETE',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_role: currentUser.role }),
-            });
-            const data = await readJson(response);
-            if (!response.ok) {
-              Alert.alert('Ошибка', data?.message || 'Не удалось удалить пользователя');
-              return;
-            }
-            await syncAllFromServer();
-          } catch {
-            Alert.alert('Ошибка', 'Не удалось удалить пользователя');
-          }
-        },
-      },
-    ]);
-  };
-
-  const startEditWorker = (worker: Worker) => {
-    setEditingWorkerId(worker.id);
-    setWorkerFormName(worker.name);
-    setScreen('admin');
-  };
-
-  const saveWorker = async () => {
-    if (!currentUser || !editingWorkerId) return;
-    try {
-      const response = await fetch(`${API_URL}/api/workers/${editingWorkerId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ full_name: workerFormName.trim(), editor_role: currentUser.role }),
-      });
-      const data = await readJson(response);
-      if (!response.ok) {
-        Alert.alert('Ошибка', data?.message || 'Не удалось обновить рабочего');
-        return;
-      }
-      await syncAllFromServer();
-      setEditingWorkerId(null);
-      setWorkerFormName('');
-      Alert.alert('Готово', 'Рабочий обновлен');
-    } catch {
-      Alert.alert('Ошибка', 'Не удалось обновить рабочего');
-    }
-  };
-
-  const deleteWorker = (worker: Worker) => {
-    if (!currentUser) return;
-    Alert.alert('Удаление рабочего', `Удалить рабочего ${worker.name}?`, [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Удалить',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const response = await fetch(`${API_URL}/api/workers/${worker.id}`, {
-              method: 'DELETE',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_role: currentUser.role }),
-            });
-            const data = await readJson(response);
-            if (!response.ok) {
-              Alert.alert('Ошибка', data?.message || 'Не удалось удалить рабочего');
-              return;
-            }
-            await syncAllFromServer();
-          } catch {
-            Alert.alert('Ошибка', 'Не удалось удалить рабочего');
-          }
-        },
-      },
-    ]);
-  };
-
   const selectedScheduleEmployeeType: ShiftEmployeeType =
-    currentUser?.role === 'Контрольный мастер'
-      ? 'controller'
-      : currentUser?.role === 'Администратор'
-      ? adminScheduleType
-      : 'worker';
+    currentUser?.role === 'Контрольный мастер' ? 'controller' : 'worker';
 
   const scheduleCandidates = selectedScheduleEmployeeType === 'worker' ? workers : controllers;
 
@@ -1451,7 +1103,6 @@ export default function App() {
     setEditingShiftId(shift.id);
     setShiftDate(shift.date);
     setShiftEmployeeName(shift.employeeName);
-    setAdminScheduleType(shift.employeeType);
     setScreen('schedule');
   };
 
@@ -1467,7 +1118,7 @@ export default function App() {
             const response = await fetch(`${API_URL}/api/shifts/${shift.id}`, {
               method: 'DELETE',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ editor_id: Number(currentUser.id), editor_role: currentUser.role }),
+              body: JSON.stringify({ editor_id: Number(currentUser.id) }),
             });
             const data = await readJson(response);
             if (!response.ok) {
@@ -1493,7 +1144,7 @@ export default function App() {
     return (
       <View style={styles.cardSoft}>
         <Text style={styles.cardSubTitle}>Последний контроль</Text>
-        <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection.date)}</Text>
+        <Text style={styles.text}>Дата контроля: {inspection.date}</Text>
         <Text style={styles.text}>Проверил: {inspection.inspector}</Text>
         <Text style={styles.text}>Годных: {inspection.acceptedCount}</Text>
         <Text style={styles.text}>Бракованных: {inspection.rejectedCount}</Text>
@@ -1503,81 +1154,43 @@ export default function App() {
 
   const renderBatchCard = (batch: Batch, mode: 'list' | 'report' = 'list') => {
     const inspection = inspections.find((item) => item.batchId === batch.id);
-    const isExpandedReportCard = mode === 'report' && reportSelectedBatchId === batch.id;
     const canEditBatch = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к проверке';
-    const canMarkReadyToSend = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
-    const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Готова к отправке';
-    const canDeleteAnyBatch = currentUser?.role === 'Администратор';
+    const canSendToAssembly = currentUser?.role === 'Производственный мастер' && batch.createdBy === currentUser.id && batch.status === 'Проверена';
     const canAcceptBatch =
       mode === 'list' &&
-      (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер') &&
+      (currentUser?.role === 'Контролер' || currentUser?.role === 'Контрольный мастер' || currentUser?.role === 'Администратор') &&
       batch.status === 'Готова к проверке' &&
       !batch.acceptedByUserId &&
       (currentUser?.role !== 'Контролер' || currentUserOnControlShift);
 
-    const canGoToInspection =
-      mode === 'list' &&
-      !!currentUser &&
-      batch.acceptedByUserId === currentUser.id &&
-      batch.status === 'Готова к проверке';
-
-    const canEditCheckedInspection =
-      mode === 'list' &&
-      !!currentUser &&
-      !!inspection &&
-      inspection.inspectorId === currentUser.id &&
-      batch.status === 'Проверена';
-
-    const onOpenCard = () => {
-      if (mode === 'report') {
-        setReportSelectedBatchId((prev) => (prev === batch.id ? null : batch.id));
-      } else if (canGoToInspection || canEditCheckedInspection) {
-        goToInspection(batch);
-      } else {
-        setSelectedBatchId(batch.id);
-      }
-    };
-
     return (
       <View key={`${mode}-${batch.id}`} style={styles.card}>
         <View style={styles.rowBetween}>
-          <Pressable onPress={onOpenCard}>
+          <Pressable onPress={() => mode === 'report' ? openReportBatch(batch.id) : setSelectedBatchId(batch.id)}>
             <Text style={[styles.cardTitle, mode === 'report' && styles.linkText]}>{batch.productName}</Text>
           </Pressable>
           <StatusBadge status={batch.status} />
         </View>
         <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
-        <Text style={styles.text}>Дата: {formatDisplayDate(mode === 'report' && batch.sentToAssemblyAt ? batch.sentToAssemblyAt : batch.manufactureDate)}</Text>
-        {(mode !== 'report' || batch.status === 'Готова к отправке' || isExpandedReportCard) && (
-          <>
-            <Text style={styles.text}>Количество: {batch.quantity}</Text>
-            <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
-            {mode === 'report' && batch.sentToAssemblyAt && isExpandedReportCard && <Text style={styles.text}>Отправлена: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>}
-            {inspection && (mode !== 'report' || isExpandedReportCard || batch.status === 'Готова к отправке') && renderInspectionPreview(inspection)}
-          </>
+        <Text style={styles.text}>ID партии: {batch.id}</Text>
+        <Text style={styles.text}>Количество: {batch.quantity}</Text>
+        <Text style={styles.text}>Дата: {batch.manufactureDate}</Text>
+        <Text style={styles.text}>Работник: {batch.workerName || 'Не назначен'}</Text>
+        {!!batch.creatorName && <Text style={styles.text}>Создал: {batch.creatorName}</Text>}
+        {!!batch.acceptedByUserId && (
+          <Text style={styles.text}>Принял в контроль: {batch.acceptedByUserId === currentUser?.id ? 'Вы' : 'другой сотрудник'}</Text>
         )}
+        {!!batch.inspectorName && <Text style={styles.text}>Проверил: {batch.inspectorName}</Text>}
+        {inspection && renderInspectionPreview(inspection)}
 
-        {mode === 'report' && isExpandedReportCard && inspection && (
+        {mode === 'report' && inspection && (
           <View style={styles.cardSoft}>
-            <Text style={styles.cardSubTitle}>Данные контроля</Text>
-            <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection.date)}</Text>
-            <Text style={styles.text}>Проверил: {inspection.inspector}</Text>
-            <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
-            <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
-            <Text style={styles.text}>Годных изделий: {inspection.acceptedCount}</Text>
-            <Text style={styles.text}>Бракованных изделий: {inspection.rejectedCount}</Text>
             <Text style={styles.cardSubTitle}>Обнаруженные дефекты</Text>
             {inspection.defects.length === 0 ? (
               <Text style={styles.text}>Дефекты не зафиксированы.</Text>
             ) : (
               inspection.defects.map((defect) => (
-                <View key={defect.id} style={styles.historyItem}>
-                  <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
-                  <Text style={styles.text}>Уверенность AI: {(defect.confidence * 100).toFixed(1)}%</Text>
-                  <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
-                  <Text style={styles.text}>Статус брака: {defect.reviewStatus}</Text>
-                  {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
-                </View>
+                <Text key={defect.id} style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
               ))
             )}
           </View>
@@ -1586,18 +1199,6 @@ export default function App() {
         {mode === 'list' && canAcceptBatch && (
           <Pressable style={styles.primaryButton} onPress={() => acceptBatchForInspection(batch)}>
             <Text style={styles.primaryButtonText}>Принять партию</Text>
-          </Pressable>
-        )}
-
-        {mode === 'list' && canGoToInspection && (
-          <Pressable style={styles.primaryButton} onPress={() => goToInspection(batch)}>
-            <Text style={styles.primaryButtonText}>Перейти к контролю</Text>
-          </Pressable>
-        )}
-
-        {mode === 'list' && canEditCheckedInspection && (
-          <Pressable style={styles.secondaryButton} onPress={() => goToInspection(batch)}>
-            <Text style={styles.secondaryButtonText}>Изменить</Text>
           </Pressable>
         )}
 
@@ -1612,21 +1213,9 @@ export default function App() {
           </View>
         )}
 
-        {mode === 'list' && canMarkReadyToSend && (
-          <Pressable style={styles.primaryButton} onPress={() => markBatchReadyToSend(batch)}>
-            <Text style={styles.primaryButtonText}>Подготовить к отправке</Text>
-          </Pressable>
-        )}
-
-        {mode === 'report' && canSendToAssembly && (
+        {mode === 'list' && canSendToAssembly && (
           <Pressable style={styles.primaryButton} onPress={() => sendBatchToAssembly(batch)}>
             <Text style={styles.primaryButtonText}>Отправить на сборку</Text>
-          </Pressable>
-        )}
-
-        {canDeleteAnyBatch && (
-          <Pressable style={styles.dangerButton} onPress={() => deleteBatch(batch)}>
-            <Text style={styles.dangerButtonText}>Удалить запись</Text>
           </Pressable>
         )}
       </View>
@@ -1659,7 +1248,8 @@ export default function App() {
 
   const showInspectionTab =
     currentUser?.role === 'Контролер' ||
-    currentUser?.role === 'Контрольный мастер';
+    currentUser?.role === 'Контрольный мастер' ||
+    currentUser?.role === 'Администратор';
 
   const showScheduleTab =
     currentUser?.role === 'Производственный мастер' ||
@@ -1714,8 +1304,8 @@ export default function App() {
               <Text style={styles.topRole}>{currentUser.role}</Text>
               <Text style={styles.topName}>{currentUser.name}</Text>
             </View>
-            <Pressable style={styles.iconButton} onPress={handleLogout}>
-              <Text style={styles.iconButtonText}>↩</Text>
+            <Pressable style={styles.secondaryButton} onPress={handleLogout}>
+              <Text style={styles.secondaryButtonText}>Выход</Text>
             </Pressable>
           </View>
 
@@ -1724,7 +1314,6 @@ export default function App() {
             <TabButton title="Партии" active={screen === 'batches'} onPress={() => setScreen('batches')} />
             {showInspectionTab && <TabButton title="Контроль" active={screen === 'inspection'} onPress={() => setScreen('inspection')} />}
             <TabButton title="Отчёты" active={screen === 'report'} onPress={() => setScreen('report')} />
-            <TabButton title="Брак" active={screen === 'defects'} onPress={() => setScreen('defects')} />
             {showScheduleTab && <TabButton title="Смены" active={screen === 'schedule'} onPress={() => setScreen('schedule')} />}
             {currentUser.role === 'Администратор' && <TabButton title="Админ" active={screen === 'admin'} onPress={() => setScreen('admin')} />}
           </View>
@@ -1736,7 +1325,7 @@ export default function App() {
                 <StatCard title="Партий за месяц" value={String(stats.total)} />
                 <StatCard title="Готовы к проверке" value={String(stats.readyCheck)} />
                 <StatCard title="Проверены" value={String(stats.checked)} />
-                <StatCard title="Готовы к отправке" value={String(stats.readyToSend)} />
+                <StatCard title="Отправлены на сборку" value={String(stats.sentToAssembly)} />
               </View>
             </View>
           )}
@@ -1748,25 +1337,7 @@ export default function App() {
                 <View style={styles.card}>
                   <Text style={styles.cardTitle}>{editingBatchId ? 'Редактирование партии' : 'Создание партии'}</Text>
                   <Label text="Наименование изделия" />
-                  <Pressable style={styles.datePickerButton} onPress={chooseProductName}>
-                    <Text style={styles.datePickerButtonText}>{newBatch.productName || 'Выбрать изделие'}</Text>
-                  </Pressable>
-                  {showProductMenu && (
-                    <View style={styles.dropdownMenu}>
-                      {PRODUCT_OPTIONS.map((option) => (
-                        <Pressable
-                          key={option}
-                          style={[styles.dropdownItem, newBatch.productName === option && styles.dropdownItemActive]}
-                          onPress={() => {
-                            setNewBatch((prev) => ({ ...prev, productName: option }));
-                            setShowProductMenu(false);
-                          }}
-                        >
-                          <Text style={[styles.dropdownItemText, newBatch.productName === option && styles.dropdownItemTextActive]}>{option}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  )}
+                  <TextInput style={styles.input} value={newBatch.productName} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, productName: value }))} />
                   <Label text="Количество" />
                   <TextInput style={styles.input} keyboardType="numeric" value={newBatch.quantity} onChangeText={(value) => setNewBatch((prev) => ({ ...prev, quantity: value }))} />
                   <Label text="Дата изготовления" />
@@ -1800,48 +1371,17 @@ export default function App() {
                 </View>
               )}
 
-              {filteredBatchesForCurrentUser.length === 0 ? (
+              {visibleBatchesPage.length === 0 ? (
                 <View style={styles.card}><Text style={styles.text}>Нет партий для отображения.</Text></View>
               ) : (
-                filteredBatchesForCurrentUser.map((batch) => renderBatchCard(batch, 'list'))
+                visibleBatchesPage.map((batch) => renderBatchCard(batch, 'list'))
               )}
             </View>
           )}
 
           {screen === 'inspection' && (
             <View>
-              <View style={styles.inspectionHeader}>
-                <SectionTitle title="Контроль" />
-                <Pressable
-                  style={styles.smallCloseButton}
-                  onPress={() => {
-                    if (!selectedBatch) {
-                      setSelectedBatchId(null);
-                      setIsControlEditMode(false);
-                      return;
-                    }
-                    Alert.alert('Отменить процесс?', '', [
-                      { text: 'Нет', style: 'cancel' },
-                      {
-                        text: 'Да',
-                        style: 'destructive',
-                        onPress: async () => {
-                          if (canCancelAcceptedBatch) {
-                            await cancelAcceptedBatch(selectedBatch);
-                            setSelectedBatchId(null);
-                            setIsControlEditMode(false);
-                            return;
-                          }
-                          setSelectedBatchId(null);
-                          setIsControlEditMode(false);
-                        },
-                      },
-                    ]);
-                  }}
-                >
-                  <Text style={styles.smallCloseButtonText}>×</Text>
-                </Pressable>
-              </View>
+              <SectionTitle title="Контроль" />
               {currentUser.role === 'Контролер' && !currentUserOnControlShift && (
                 <View style={[styles.card, styles.warningCard]}>
                   <Text style={styles.warningText}>Контролер не назначен на смену сегодня и не может принимать новые партии.</Text>
@@ -1857,18 +1397,13 @@ export default function App() {
                     <Text style={styles.text}>Количество: {selectedBatch.quantity}</Text>
                     <Text style={styles.text}>Работник: {selectedBatch.workerName || 'Не назначен'}</Text>
                     <Text style={styles.text}>Статус: {selectedBatch.status}</Text>
+                    {!!selectedBatch.acceptedByUserId && <Text style={styles.text}>Принял в контроль: {selectedBatchAcceptedByCurrentUser ? 'Вы' : 'другой сотрудник'}</Text>}
+                    {selectedInspection && <Text style={styles.text}>Проверил: {selectedInspection.inspector}</Text>}
                   </View>
-
 
                   {selectedBatch.status === 'Проверена' && selectedInspection && selectedInspection.inspectorId !== currentUser.id && (
                     <View style={[styles.card, styles.warningCard]}>
                       <Text style={styles.warningText}>Партия уже проверена. Изменять ее до отправки на сборку может только {selectedInspection.inspector}.</Text>
-                    </View>
-                  )}
-
-                  {selectedBatch.status === 'Готова к отправке' && (
-                    <View style={[styles.card, styles.warningCard]}>
-                      <Text style={styles.warningText}>Партия подготовлена к отправке. Редактирование контроля недоступно.</Text>
                     </View>
                   )}
 
@@ -1880,11 +1415,6 @@ export default function App() {
 
                   <View style={styles.card}>
                     <Text style={styles.cardTitle}>Результаты контроля</Text>
-                    {selectedInspection && canEditInspectionByCurrentUser && !isControlEditMode && (
-                      <Pressable style={styles.secondaryButton} onPress={() => setIsControlEditMode(true)}>
-                        <Text style={styles.secondaryButtonText}>Изменить</Text>
-                      </Pressable>
-                    )}
                     <Label text="Изображение для анализа" />
                     {!inspectionForm.imageUri && !inspectionLocked && (
                       <>
@@ -1950,6 +1480,8 @@ export default function App() {
                     <TextInput style={styles.textarea} multiline value={inspectionForm.geometryConclusion} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, geometryConclusion: value }))} editable={!inspectionLocked} />
                     <Label text="Годных изделий" />
                     <TextInput style={styles.input} keyboardType="numeric" value={inspectionForm.acceptedCount} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, acceptedCount: value }))} editable={!inspectionLocked} />
+                    <Label text="Общий комментарий по партии" />
+                    <TextInput style={styles.textarea} multiline value={inspectionForm.comment} onChangeText={(value) => setInspectionForm((prev) => ({ ...prev, comment: value }))} editable={!inspectionLocked} />
                     {!inspectionLocked && (
                       <Pressable style={styles.primaryButton} onPress={saveInspection}><Text style={styles.primaryButtonText}>{selectedInspection ? 'Сохранить изменения' : 'Сохранить контроль'}</Text></Pressable>
                     )}
@@ -1962,157 +1494,79 @@ export default function App() {
           {screen === 'report' && (
             <View>
               <SectionTitle title="Отчёты" />
-
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Фильтр</Text>
+                <Text style={styles.cardTitle}>Фильтр по датам</Text>
                 <Label text="Дата от" />
                 <Pressable style={styles.datePickerButton} onPress={() => setShowReportFromPicker(true)}>
                   <Text style={styles.datePickerButtonText}>{reportDateFrom ? formatDisplayDate(reportDateFrom) : 'Выбрать дату'}</Text>
                 </Pressable>
                 {showReportFromPicker && (
-                  <DateTimePicker
-                    value={reportDateFrom ? new Date(reportDateFrom) : new Date()}
-                    mode="date"
-                    display="default"
-                    onChange={onChangeReportFromDate}
-                  />
+                  <DateTimePicker value={reportDateFrom ? new Date(reportDateFrom) : new Date()} mode="date" display="default" onChange={onChangeReportFromDate} />
                 )}
                 <Label text="Дата до" />
                 <Pressable style={styles.datePickerButton} onPress={() => setShowReportToPicker(true)}>
                   <Text style={styles.datePickerButtonText}>{reportDateTo ? formatDisplayDate(reportDateTo) : 'Выбрать дату'}</Text>
                 </Pressable>
                 {showReportToPicker && (
-                  <DateTimePicker
-                    value={reportDateTo ? new Date(reportDateTo) : new Date()}
-                    mode="date"
-                    display="default"
-                    onChange={onChangeReportToDate}
-                  />
+                  <DateTimePicker value={reportDateTo ? new Date(reportDateTo) : new Date()} mode="date" display="default" onChange={onChangeReportToDate} />
                 )}
-                <Label text="Статус брака" />
-                <View style={styles.filterRow}>
-                  {(['Все', ...DEFECT_STATUS_OPTIONS] as const).map((status) => (
-                    <Pressable key={status} style={[styles.filterChip, reportDefectStatus === status && styles.filterChipActive]} onPress={() => setReportDefectStatus(status as any)}>
-                      <Text style={[styles.filterChipText, reportDefectStatus === status && styles.filterChipTextActive]}>{status}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-                {(reportDateFrom || reportDateTo || reportDefectStatus !== 'Все') && (
-                  <Pressable
-                    style={styles.secondaryButton}
-                    onPress={() => {
-                      setReportDateFrom('');
-                      setReportDateTo('');
-                      setReportDefectStatus('Все');
-                    }}
-                  >
-                    <Text style={styles.secondaryButtonText}>Сбросить фильтр</Text>
-                  </Pressable>
-                )}
+                <Pressable style={styles.secondaryButton} onPress={() => { setReportDateFrom(''); setReportDateTo(''); setReportSelectedBatchId(null); }}>
+                  <Text style={styles.secondaryButtonText}>Сбросить фильтр</Text>
+                </Pressable>
               </View>
 
+              {reportSelectedBatch && (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Детали партии из отчета</Text>
+                  <Text style={styles.text}>Партия: {reportSelectedBatch.batchNumber}</Text>
+                  <Text style={styles.text}>Изделие: {reportSelectedBatch.productName}</Text>
+                  <Text style={styles.text}>Работник: {reportSelectedBatch.workerName}</Text>
+                  <Text style={styles.text}>Статус: {reportSelectedBatch.status}</Text>
+                  {!!reportSelectedInspection && (
+                    <>
+                      <Text style={styles.text}>Проверил: {reportSelectedInspection.inspector}</Text>
+                      <Text style={styles.text}>Дата контроля: {reportSelectedInspection.date}</Text>
+                      <Text style={styles.text}>Визуальный контроль: {reportSelectedInspection.visualConclusion || '—'}</Text>
+                      <Text style={styles.text}>Параметры: {reportSelectedInspection.geometryConclusion || '—'}</Text>
+                      <Text style={styles.text}>Годных изделий: {reportSelectedInspection.acceptedCount}</Text>
+                      <Text style={styles.text}>Бракованных изделий: {reportSelectedInspection.rejectedCount}</Text>
+                      <Text style={styles.text}>Комментарий: {reportSelectedInspection.comment || '—'}</Text>
+                      <Text style={styles.cardSubTitle}>Обнаруженные дефекты</Text>
+                      {reportSelectedInspection.defects.length === 0 ? (
+                        <Text style={styles.text}>Дефекты не зафиксированы.</Text>
+                      ) : (
+                        reportSelectedInspection.defects.map((defect) => (
+                          <View key={defect.id} style={styles.historyItem}>
+                            <Text style={styles.text}><Text style={styles.textBold}>{defect.defectClass}</Text> — {defect.affectedCount} шт.</Text>
+                            <Text style={styles.text}>Уверенность AI: {(defect.confidence * 100).toFixed(1)}%</Text>
+                            <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
+                            {!!defect.imageUri && <Image source={{ uri: defect.imageUri }} style={styles.imagePreviewSmall} />}
+                          </View>
+                        ))
+                      )}
+                    </>
+                  )}
+                </View>
+              )}
+
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Готовы к отправке</Text>
-                {readyToSendBatches.length === 0 ? (
-                  <Text style={styles.text}>Нет партий, готовых к отправке.</Text>
-                ) : (
-                  readyToSendBatches.map((batch) => renderBatchCard(batch, 'report'))
-                )}
+                <Text style={styles.cardTitle}>Отчёты за последний месяц</Text>
+                {recentArchive.length === 0 ? <Text style={styles.text}>Нет отчётов за последний месяц.</Text> : recentArchive.map((batch) => renderBatchCard(batch, 'report'))}
               </View>
 
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Архив по месяцам</Text>
                 {Object.keys(folderedArchive).length === 0 ? (
-                  <Text style={styles.text}>Архивных партий пока нет.</Text>
+                  <Text style={styles.text}>Архивных отчётов старше месяца нет.</Text>
                 ) : (
-                  Object.entries(folderedArchive).map(([folder, items]) => {
-                    const isOpen = expandedArchiveMonths.includes(folder);
-                    return (
-                      <View key={folder} style={styles.cardSoft}>
-                        <Pressable style={styles.rowBetween} onPress={() => setExpandedArchiveMonths((prev) => prev.includes(folder) ? prev.filter((item) => item !== folder) : [...prev, folder])}>
-                          <Text style={styles.cardSubTitle}>{folder}</Text>
-                          <Text style={styles.text}>{isOpen ? '−' : '+'}</Text>
-                        </Pressable>
-                        {isOpen && (items as Batch[]).map((batch) => renderBatchCard(batch, 'report'))}
-                      </View>
-                    );
-                  })
+                  Object.entries(folderedArchive).map(([folder, items]) => (
+                    <View key={folder} style={styles.cardSoft}>
+                      <Text style={styles.cardSubTitle}>{folder}</Text>
+                      {(items as Batch[]).map((batch) => renderBatchCard(batch, 'report'))}
+                    </View>
+                  ))
                 )}
               </View>
-            </View>
-          )}
-
-          {screen === 'defects' && (
-            <View>
-              <SectionTitle title="Брак" />
-              {Object.keys(defectBatchesByProduct).length === 0 ? (
-                <View style={styles.card}><Text style={styles.text}>Записей о браке пока нет.</Text></View>
-              ) : (
-                Object.entries(defectBatchesByProduct).map(([productName, items]) => (
-                  <View key={productName} style={styles.card}>
-                    <Text style={styles.cardTitle}>{productName}</Text>
-                    {items.map((batch) => {
-                      const inspection = inspections.find((item) => item.batchId === batch.id);
-                      const firstDefect = inspection?.defects?.[0];
-                      const isExpanded = defectExpandedBatchId === batch.id;
-                      return (
-                        <View key={batch.id} style={styles.historyItem}>
-                          <Pressable onPress={() => setDefectExpandedBatchId((prev) => (prev === batch.id ? null : batch.id))}>
-                            <Text style={styles.defectItemTitle}>{batch.productName}</Text>
-                            <Text style={styles.text}>Дата контроля: {formatDisplayDate(inspection?.date)}</Text>
-                            {!!firstDefect?.imageUri && <Image source={{ uri: firstDefect.imageUri }} style={styles.imagePreviewSmall} />}
-                          </Pressable>
-                          {isExpanded && inspection && (
-                            <View style={styles.cardSoft}>
-                              <Text style={styles.text}>Номер партии: {batch.batchNumber}</Text>
-                              <Text style={styles.text}>Дата создания: {formatDisplayDate(batch.manufactureDate)}</Text>
-                              <Text style={styles.text}>Дата проверки: {formatDisplayDate(inspection.date)}</Text>
-                              <Text style={styles.text}>Дата отправки: {formatDisplayDate(batch.sentToAssemblyAt)}</Text>
-                              <Text style={styles.text}>Работник: {batch.workerName}</Text>
-                              <Text style={styles.text}>Визуальный контроль: {inspection.visualConclusion || '—'}</Text>
-                              <Text style={styles.text}>Параметры: {inspection.geometryConclusion || '—'}</Text>
-                              {inspection.defects.map((defect) => (
-                                <View key={defect.id} style={styles.historyItem}>
-                                  <Text style={styles.text}>• {defect.defectClass} — {defect.affectedCount} шт.</Text>
-                                  <Text style={styles.text}>Комментарий: {defect.comment || '—'}</Text>
-                                  <Text style={styles.text}>Статус: {defect.reviewStatus}</Text>
-                                  <View style={styles.filterRow}>
-                                    {DEFECT_STATUS_OPTIONS.map((status) => (
-                                      <Pressable
-                                        key={status}
-                                        style={[styles.filterChip, defect.reviewStatus === status && styles.filterChipActive]}
-                                        onPress={async () => {
-                                          try {
-                                            const response = await fetch(`${API_URL}/api/inspection-defects/${defect.id}/status`, {
-                                              method: 'PUT',
-                                              headers: { 'Content-Type': 'application/json' },
-                                              body: JSON.stringify({ review_status: status }),
-                                            });
-                                            const data = await readJson(response);
-                                            if (!response.ok) {
-                                              Alert.alert('Ошибка', data?.message || 'Не удалось обновить статус брака');
-                                              return;
-                                            }
-                                            await syncAllFromServer();
-                                          } catch {
-                                            Alert.alert('Ошибка', 'Не удалось обновить статус брака');
-                                          }
-                                        }}
-                                      >
-                                        <Text style={[styles.filterChipText, defect.reviewStatus === status && styles.filterChipTextActive]}>{status}</Text>
-                                      </Pressable>
-                                    ))}
-                                  </View>
-                                </View>
-                              ))}
-                            </View>
-                          )}
-                        </View>
-                      );
-                    })}
-                  </View>
-                ))
-              )}
             </View>
           )}
 
@@ -2121,21 +1575,8 @@ export default function App() {
               <SectionTitle title="Смены" />
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>
-                  {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : currentUser.role === 'Администратор' ? 'Управление сменами' : 'Отметить выход на смену'}
+                  {editingShiftId ? 'Редактирование смены' : currentUser.role === 'Контрольный мастер' ? 'Назначить контролера на смену' : 'Отметить выход на смену'}
                 </Text>
-                {currentUser.role === 'Администратор' && !editingShiftId && (
-                  <>
-                    <Label text="Тип сотрудника" />
-                    <View style={styles.roleRow}>
-                      <Pressable style={[styles.roleButton, adminScheduleType === 'worker' && styles.roleButtonActive]} onPress={() => setAdminScheduleType('worker')}>
-                        <Text style={[styles.roleButtonText, adminScheduleType === 'worker' && styles.roleButtonTextActive]}>Рабочий</Text>
-                      </Pressable>
-                      <Pressable style={[styles.roleButton, adminScheduleType === 'controller' && styles.roleButtonActive]} onPress={() => setAdminScheduleType('controller')}>
-                        <Text style={[styles.roleButtonText, adminScheduleType === 'controller' && styles.roleButtonTextActive]}>Контролер / КМ</Text>
-                      </Pressable>
-                    </View>
-                  </>
-                )}
                 <Label text="Дата" />
                 <Pressable style={styles.datePickerButton} onPress={openShiftDatePicker}>
                   <Text style={styles.datePickerButtonText}>{shiftDate || 'Выбрать дату'}</Text>
@@ -2168,10 +1609,10 @@ export default function App() {
                     .filter((shift) => currentUser.role === 'Администратор' || (currentUser.role === 'Производственный мастер' ? shift.employeeType === 'worker' : currentUser.role === 'Контрольный мастер' ? shift.employeeType === 'controller' : true))
                     .map((shift) => (
                       <View key={shift.id} style={styles.historyItem}>
-                        <Text style={styles.text}><Text style={styles.textBold}>{formatDisplayDate(shift.date)}</Text></Text>
+                        <Text style={styles.text}><Text style={styles.textBold}>{shift.date}</Text></Text>
                         <Text style={styles.text}>Сотрудник: {shift.employeeName}</Text>
                         <Text style={styles.text}>Тип: {shift.roleLabel || (shift.employeeType === 'worker' ? 'Рабочий' : 'Контролер')}</Text>
-                        {(currentUser.role === 'Администратор' || shift.assignedBy === currentUser.id) && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
+                        {shift.assignedBy === currentUser.id && (currentUser.role === 'Производственный мастер' || currentUser.role === 'Контрольный мастер' || currentUser.role === 'Администратор') && (
                           <View style={styles.actionsWrap}>
                             <Pressable style={styles.secondaryButton} onPress={() => editShift(shift)}><Text style={styles.secondaryButtonText}>Редактировать</Text></Pressable>
                             <Pressable style={styles.dangerButton} onPress={() => deleteShift(shift)}><Text style={styles.dangerButtonText}>Удалить</Text></Pressable>
@@ -2189,74 +1630,21 @@ export default function App() {
               <SectionTitle title="Панель администратора" />
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Пользователи</Text>
-                {editingUserId && (
-                  <View style={styles.cardSoft}>
-                    <Label text="Имя" />
-                    <TextInput style={styles.input} value={userForm.name} onChangeText={(value) => setUserForm((prev) => ({ ...prev, name: value }))} />
-                    <Label text="Логин" />
-                    <TextInput style={styles.input} value={userForm.login} onChangeText={(value) => setUserForm((prev) => ({ ...prev, login: value }))} />
-                    <Label text="Новый пароль" />
-                    <TextInput style={styles.input} value={userForm.password} onChangeText={(value) => setUserForm((prev) => ({ ...prev, password: value }))} placeholder="Оставьте пустым, чтобы не менять" placeholderTextColor={COLORS.muted} />
-                    <Label text="Роль" />
-                    <View style={styles.roleRow}>
-                      {(['Администратор', 'Производственный мастер', 'Контрольный мастер', 'Контролер'] as Role[]).map((role) => (
-                        <Pressable key={role} style={[styles.roleButton, userForm.role === role && styles.roleButtonActive]} onPress={() => setUserForm((prev) => ({ ...prev, role }))}>
-                          <Text style={[styles.roleButtonText, userForm.role === role && styles.roleButtonTextActive]}>{role}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                    <Pressable style={styles.primaryButton} onPress={saveUser}>
-                      <Text style={styles.primaryButtonText}>Сохранить пользователя</Text>
-                    </Pressable>
-                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingUserId(null); setUserForm({ name: '', login: '', password: '', role: 'Контролер' }); }}>
-                      <Text style={styles.secondaryButtonText}>Отмена</Text>
-                    </Pressable>
-                  </View>
-                )}
                 {users.map((u) => (
                   <View key={u.id} style={styles.historyItem}>
                     <Text style={styles.text}><Text style={styles.textBold}>{u.name}</Text></Text>
                     <Text style={styles.text}>Логин: {u.login}</Text>
                     <Text style={styles.text}>Роль: {u.role}</Text>
-                    <View style={styles.actionsWrap}>
-                      <Pressable style={styles.secondaryButton} onPress={() => startEditUser(u)}>
-                        <Text style={styles.secondaryButtonText}>Редактировать</Text>
-                      </Pressable>
-                      {u.id !== currentUser.id && (
-                        <Pressable style={styles.dangerButton} onPress={() => deleteUser(u)}>
-                          <Text style={styles.dangerButtonText}>Удалить</Text>
-                        </Pressable>
-                      )}
-                    </View>
                   </View>
                 ))}
               </View>
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Рабочие</Text>
-                <View style={styles.cardSoft}>
-                  <Label text={editingWorkerId ? 'Редактирование рабочего' : 'Новый рабочий'} />
-                  <TextInput style={styles.input} value={editingWorkerId ? workerFormName : newWorkerName} onChangeText={editingWorkerId ? setWorkerFormName : setNewWorkerName} />
-                  <Pressable style={styles.primaryButton} onPress={editingWorkerId ? saveWorker : () => addWorker()}>
-                    <Text style={styles.primaryButtonText}>{editingWorkerId ? 'Сохранить рабочего' : 'Добавить рабочего'}</Text>
-                  </Pressable>
-                  {editingWorkerId && (
-                    <Pressable style={styles.secondaryButton} onPress={() => { setEditingWorkerId(null); setWorkerFormName(''); }}>
-                      <Text style={styles.secondaryButtonText}>Отмена</Text>
-                    </Pressable>
-                  )}
-                </View>
+                <Label text="Новый рабочий" />
+                <TextInput style={styles.input} value={newWorkerName} onChangeText={setNewWorkerName} />
+                <Pressable style={styles.primaryButton} onPress={addWorker}><Text style={styles.primaryButtonText}>Добавить рабочего</Text></Pressable>
                 {workers.map((worker) => (
-                  <View key={worker.id} style={styles.historyItem}>
-                    <Text style={styles.text}>{worker.name}</Text>
-                    <View style={styles.actionsWrap}>
-                      <Pressable style={styles.secondaryButton} onPress={() => startEditWorker(worker)}>
-                        <Text style={styles.secondaryButtonText}>Редактировать</Text>
-                      </Pressable>
-                      <Pressable style={styles.dangerButton} onPress={() => deleteWorker(worker)}>
-                        <Text style={styles.dangerButtonText}>Удалить</Text>
-                      </Pressable>
-                    </View>
-                  </View>
+                  <View key={worker.id} style={styles.historyItem}><Text style={styles.text}>{worker.name}</Text></View>
                 ))}
               </View>
             </View>
@@ -2293,10 +1681,6 @@ const styles = StyleSheet.create({
   primaryButtonText: { color: '#052e16', fontWeight: '800' },
   secondaryButton: { backgroundColor: COLORS.soft, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   secondaryButtonText: { color: COLORS.text, fontWeight: '700' },
-  iconButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  iconButtonText: { color: COLORS.text, fontSize: 20, fontWeight: '800' },
-  smallCloseButton: { width: 44, height: 44, backgroundColor: COLORS.soft, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  smallCloseButtonText: { color: COLORS.text, fontSize: 28, fontWeight: '700', lineHeight: 28 },
   dangerButton: { backgroundColor: '#7f1d1d', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center', marginRight: 8, marginBottom: 8 },
   dangerButtonText: { color: '#fee2e2', fontWeight: '700' },
   sectionTitle: { color: COLORS.text, fontSize: 22, fontWeight: '700', marginBottom: 12 },
@@ -2305,10 +1689,9 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 28, fontWeight: '800', color: COLORS.accent2 },
   statTitle: { marginTop: 6, color: COLORS.muted, fontSize: 13 },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  inspectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   badge: { borderRadius: 999, paddingVertical: 6, paddingHorizontal: 10, marginLeft: 8 },
   badgeText: { color: 'white', fontSize: 12, fontWeight: '700' },
-  actionsWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12, gap: 8 },
+  actionsWrap: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12 },
   aiBox: { backgroundColor: '#082f49', borderWidth: 1, borderColor: '#0ea5e9', borderRadius: 14, padding: 12, marginTop: 12, marginBottom: 12 },
   historyItem: { borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 10, marginTop: 10 },
   previewBox: { backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 14, padding: 12, marginBottom: 12 },
@@ -2332,16 +1715,4 @@ const styles = StyleSheet.create({
   warningCard: { borderColor: '#f59e0b', backgroundColor: '#451a03' },
   warningText: { color: '#fde68a', fontWeight: '600', lineHeight: 20 },
   linkText: { textDecorationLine: 'underline', color: COLORS.accent2 },
-  dropdownMenu: { backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, marginBottom: 8, overflow: 'hidden' },
-  dropdownItem: { paddingHorizontal: 14, paddingVertical: 12, borderTopWidth: 1, borderTopColor: COLORS.border },
-  dropdownItemActive: { backgroundColor: '#1e3a8a' },
-  dropdownItemText: { color: COLORS.text, fontSize: 15, fontWeight: '600' },
-  dropdownItemTextActive: { color: '#dbeafe' },
-  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
-  filterChip: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, backgroundColor: '#0b1220', borderWidth: 1, borderColor: COLORS.border, marginBottom: 8 },
-  filterChipActive: { backgroundColor: COLORS.accent2, borderColor: COLORS.accent2 },
-  filterChipText: { color: COLORS.text, fontWeight: '600', fontSize: 12 },
-  filterChipTextActive: { color: '#082f49', fontWeight: '800' },
-  defectItemTitle: { color: COLORS.accent2, fontSize: 20, fontWeight: '700', textDecorationLine: 'underline', marginBottom: 4 },
 });
-
