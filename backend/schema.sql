@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS workers (
   id SERIAL PRIMARY KEY,
-  full_name TEXT UNIQUE NOT NULL
+  full_name TEXT UNIQUE NOT NULL,
+  login TEXT UNIQUE,
+  password_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS batches (
@@ -16,10 +18,12 @@ CREATE TABLE IF NOT EXISTS batches (
   batch_number TEXT UNIQUE NOT NULL,
   product_name TEXT NOT NULL,
   quantity INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'Готова к проверке',
+  status TEXT NOT NULL DEFAULT 'Создана',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   assigned_worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL,
+  assigned_shift_type TEXT DEFAULT 'day',
+  started_by_worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL,
   accepted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -73,3 +77,9 @@ UPDATE shifts SET employee_type = COALESCE(employee_type, CASE WHEN user_id IS N
 ALTER TABLE batches ADD COLUMN IF NOT EXISTS accepted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS employee_name TEXT;
 UPDATE shifts SET employee_name = COALESCE(employee_name, 'Не указан');
+
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS login TEXT UNIQUE;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS started_by_worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS assigned_shift_type TEXT DEFAULT 'day';
+ALTER TABLE inspection_defects ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'На рассмотрении';
