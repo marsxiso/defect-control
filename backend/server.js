@@ -9,9 +9,13 @@ const axios = require('axios');
 const { Pool } = require('pg');
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+const upload = multer({ dest: uploadsDir });
 
+app.set('trust proxy', true);
 app.use(cors());
+app.use('/uploads', express.static(uploadsDir));
 app.use(express.json({ limit: '25mb' }));
 
 const pool = new Pool({
@@ -882,7 +886,9 @@ app.post('/api/upload-image', upload.single('file'), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ ok: false, message: 'Файл не загружен' });
     }
-    const imageUri = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+    const host = req.get('host');
+    const imageUri = `${proto}://${host}/uploads/${req.file.filename}`;
     res.json({ ok: true, image_uri: imageUri });
   } catch (error) {
     console.error('UPLOAD IMAGE ERROR:', error);

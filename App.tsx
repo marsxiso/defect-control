@@ -750,7 +750,7 @@ export default function App() {
       .filter((shift) => shift.employeeType === 'worker' && String(shift.date).slice(0, 10) === newBatch.manufactureDate && (shift.shiftType || 'day') === newBatch.shiftType)
       .map((shift) => shift.employeeName);
     return workers.filter((worker) => activeShiftWorkers.includes(worker.name));
-  }, [workers, shifts, newBatch.manufactureDate]);
+  }, [workers, shifts, newBatch.manufactureDate, newBatch.shiftType]);
 
   const controllersOnShiftToday = useMemo(
     () => shifts.filter((shift) => shift.employeeType === 'controller' && shift.date === todayStr()).map((shift) => shift.assigneeId),
@@ -1029,7 +1029,13 @@ export default function App() {
       Alert.alert('Ошибка', 'Рабочий не найден на сервере');
       return;
     }
-    const workerOnShift = shifts.some((shift) => shift.employeeType === 'worker' && shift.date === newBatch.manufactureDate && shift.employeeName === worker.name);
+    const workerOnShift = shifts.some(
+      (shift) =>
+        shift.employeeType === 'worker' &&
+        shift.date === newBatch.manufactureDate &&
+        shift.employeeName === worker.name &&
+        (shift.shiftType || 'day') === newBatch.shiftType,
+    );
     if (!workerOnShift) {
       Alert.alert('Ошибка', 'Выбранный рабочий не отмечен в смене на эту дату');
       return;
@@ -1069,6 +1075,8 @@ export default function App() {
           quantity: Number(newBatch.quantity || '0'),
           created_by: Number(currentUser.id),
           assigned_worker_id: Number(worker.id),
+          assigned_shift_type: newBatch.shiftType,
+          manufacture_date: `${newBatch.manufactureDate}T00:00:00.000Z`,
         }),
       });
       const data = await readJson(response);
