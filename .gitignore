@@ -15,7 +15,6 @@ yarn-debug.*
 yarn-error.*
 .DS_Store
 *.pem
-.env
 .env*.local
 *.tsbuildinfo
 app-example
